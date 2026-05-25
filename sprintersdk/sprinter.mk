@@ -35,8 +35,12 @@ CODE_LOC ?= 0x2400
 
 CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 
-# crt0 должен идти первым в линковке (=> _entry на code-loc)
-OBJS := $(BUILD)/crt0.rel $(BUILD)/main.rel
+# crt0 должен идти первым в линковке (=> _entry на code-loc).
+# SDCC 2.9.0 z80 runtime-хелперы (* / % , long, сдвиги): прямой sdldz80 НЕ
+# подтягивает z80-lib SDCC, поэтому линкуем их явно (historical SDCC runtime).
+SDCC290_RTL := compat div divsigned divulong mod modulong mul mullong shift
+RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
+OBJS := $(BUILD)/crt0.rel $(BUILD)/lib_startup.rel $(BUILD)/main.rel $(RTL_RELS)
 
 .PHONY: all clean resources assets exe
 all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
@@ -74,10 +78,14 @@ $(BUILD)/$(OUT).ihx: $(OBJS)
 	@printf '%s\n' '-e'                   >> $(BUILD)/$(OUT).lk
 	$(SDLDZ80) -n -f $(BUILD)/$(OUT).lk
 
-# --- asm (.s) -> .rel ---
+# --- asm (.s) -> .rel : crt0 + sdcc290_* runtime ---
 # Этот sdld ищет объект как <base>.o (заменяет .rel->.o), поэтому делаем .o-копию
 # (приём из evosdk_libs).
-$(BUILD)/crt0.rel: $(SDK_DIR)crt0.s | $(BUILD)
+$(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
+	cp $@ $(basename $@).o
+
+$(BUILD)/lib_startup.rel: $(SDK_DIR)lib_startup.asm | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
 	cp $@ $(basename $@).o
 

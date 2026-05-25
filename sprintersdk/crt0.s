@@ -14,6 +14,8 @@
 
         .module crt0
         .globl  _main
+        .globl  _evo_runtime_init
+        .globl  _evo_runtime_shutdown
         .globl  l__INITIALIZER
         .globl  s__INITIALIZED
         .globl  s__INITIALIZER
@@ -25,10 +27,18 @@
         .area   _CODE
 _entry::
         call    gsinit
+        call    _evo_runtime_init
         call    _main
 
-        ; TODO(scheme-c-exit): возврат в DSS через RST #10 (DSS.Exit) с
-        ; трамплином в WIN3 (cache off -> ROM -> RST -> on). Пока заглушка.
+        push    hl
+        call    _evo_runtime_shutdown
+        pop     hl
+
+        ; DSS.Exit. Когда SDK будет перенесён в SRAM/cache, этот RST уйдёт в
+        ; трамплин cache off -> ROM -> RST -> cache on/exit.
+        ld      b, l
+        ld      c, #0x41
+        rst     #0x10
         di
         halt
 

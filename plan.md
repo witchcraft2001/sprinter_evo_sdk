@@ -105,10 +105,29 @@
 
 ---
 
-## Этап 2. Каркас SDK и загрузка (boot) ⬜
+## Этап 2. Каркас SDK и загрузка (boot) 🟦
 
-- ⬜ `sprintersdk/crt0.s`, `lib_startup.asm`: инициализация под DSS, установка карты
+- 🟦 `sprintersdk/crt0.s`, `lib_startup.asm`: инициализация под DSS, установка карты
       памяти, видео-режима, палитры, IM2-обработчика. Паритет логики с `evosdk/`.
+      → Начат минимальный asm-рантайм: `crt0.s` вызывает `_evo_runtime_init` до `main`
+      и `_evo_runtime_shutdown` перед `DSS.Exit`; `lib_startup.asm` сохраняет/восстанавливает
+      DSS state, ставит Sprinter 320×256×8bpp через `DSS.SetVMod`.
+      **Важно:** видеорежим инициализируется для обеих страниц строго как в рабочем
+      `evosdk_libs/sprinter/lib/video_setmode.s`: сначала `A=#81,B=1`, затем
+      `A=#81,B=0`. Это предотвращает чёрный экран после первого `swap_screen`, если
+      вторая страница не была подготовлена.
+      Добавлены базовые asm-точки API (`vsync`, `swap_screen`, `delay`, `time`,
+      `memset/memcpy`, `rand16`) и временные заглушки остальных функций до переноса
+      профильных `lib_*.asm`.
+      → **Ревью + правки:** добавлены SDCC 2.9.0 z80 runtime-хелперы
+      `sprintersdk/sdcc290_*.s` (mul/div/mod/shift/long; реюз из `evosdk_libs`) —
+      прямой `sdldz80` не тянет z80-lib SDCC, без них `* / %`/long не линкуются.
+      Теперь `example_sprites` линкуется (`__moduint_rrx_s` и др. разрешены), `empty_project`
+      ок. Убран ложный `IN (#89)` в `save_dss_state` (PORT_Y write-only).
+      **Открыто (из ревью):** `_border` пишет `#CA` — сверить (в evosdk_libs border()=no-op);
+      читаемость селекторов `#82/#C2`; селективный линк хелперов через `.lib` (сейчас
+      линкуются все ~1–2 КБ) — опциональная оптимизация. time тикает только на vsync (IM2
+      ещё нет — Этап 5).
 - ⬜ `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
       загрузчиком** (`LOADER`@8, PRELOAD; референс `kode/KodeEXE.asm`, см. `HW_NOTES.md`
       §9.1): DSS грузит loader, тот берёт FM из `PSP[IX-3]`, `BIOS.GetMem` страницы,
