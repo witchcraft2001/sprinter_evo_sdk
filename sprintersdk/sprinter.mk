@@ -29,6 +29,7 @@ RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
 ASSETS_RAW ?= $(BUILD)/assets.raw.dat
 EXE      ?= $(BUILD)/$(OUT).exe
+LOADER_LOC ?= 0x4100
 
 # Scheme C
 CODE_LOC ?= 0x2400
@@ -63,11 +64,11 @@ $(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) | $(BUILD)
 	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
 endif
 
-# Direct DSS EXE requires CODE_LOC >= 0x4100. The current Scheme C default
-# (0x2400) needs the Stage 2 loader, so this target is intentionally separate
-# from `all` and dss_exe.py will reject the low-load case.
+# Direct DSS EXE requires LD_ADDR >= 0x4100. For Scheme C CODE_LOC=0x2400,
+# dss_exe.py emits the current Stage 2 low-loader at LOADER_LOC: DSS loads
+# loader+code there, the loader copies the C image down to CODE_LOC and jumps.
 $(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE)
-	$(PYTHON) $(DSS_EXE) $< $@ --load $(CODE_LOC) --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT)
+	$(PYTHON) $(DSS_EXE) $< $@ --load $(CODE_LOC) --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) --low-loader-load $(LOADER_LOC)
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)

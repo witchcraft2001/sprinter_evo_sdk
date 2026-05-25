@@ -128,12 +128,25 @@
       читаемость селекторов `#82/#C2`; селективный линк хелперов через `.lib` (сейчас
       линкуются все ~1–2 КБ) — опциональная оптимизация. time тикает только на vsync (IM2
       ещё нет — Этап 5).
-- ⬜ `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
+- 🟦 `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
       загрузчиком** (`LOADER`@8, PRELOAD; референс `kode/KodeEXE.asm`, см. `HW_NOTES.md`
       §9.1): DSS грузит loader, тот берёт FM из `PSP[IX-3]`, `BIOS.GetMem` страницы,
       последовательно `Dss.Read`+`DePACK` (HRUST `.hst` от `pack_spk`) блобы тела →
       SDK в SRAM/WIN0, C-код в `#2400+`, ассеты по страницам; ставит карту Scheme C, `I`
       (IM2), `SP=#23FF`, прыгает в рантайм. (Нужен Z80-депакер HRUST — из `kode/DEPACK`.)
+      → **Промежуточный boot готов для малых EXE:** `dss_exe.py` при `CODE_LOC<#4100`
+      генерирует direct low-loader (`sprintersdk/loader.asm`): DSS грузит EXE в `#4100`,
+      loader копирует C-образ из `#4112` в `#2400`, ставит `SP=#23FF`, прыгает в `_entry`.
+      → **Ревью + фиксы:** исправлен off-by-one (`LOW_COPY_LOADER_SIZE` 17→18 — loader
+      реально 18 Б; иначе релокация на 1 байт ломала `_entry`); добавлен guard на наезд
+      копии на loader (`#2400+code > #4100` → ошибка с указанием на PRELOAD-загрузчик) и
+      assert длины loader. Проверено: empty_project EXE релоцируется корректно (`_entry`
+      начинается с `CD`=call gsinit), большой код отвергается. Ассеты в low-loader пока
+      грузятся, но не маппятся — это задача полного PRELOAD-загрузчика.
+      `empty_project` теперь собирается в валидный EXE при дефолтном `CODE_LOC=#2400`.
+      Ограничение осознанное: loader не PRELOAD, поэтому тело должно помещаться до
+      `#FFFF`; `example_sprites` с ассетами корректно отвергается с требованием полного
+      PRELOAD file-reading loader.
 - ⬜ `Makefile` (SDK-уровня и проектного уровня): сборка `evo.c` + asm-библиотек + crt0 +
       ассетов в EXE. Команда сборки проекта — одна `make`-цель.
 - ⬜ `sprintersdk/evo.h`: тот же API, что `evosdk/evo.h` (идентичные сигнатуры/константы).

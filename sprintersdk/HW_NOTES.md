@@ -289,6 +289,14 @@ ver@3, офсет кода@4) → **формат корректен и совм�
 (IM2), `SP`, прыгает в рантайм. Текущий `dss_exe --assets` (слепой append, `LOADER`=0) —
 временный стаб; в Этапе 2 заменяется на монолит с PRELOAD-загрузчиком.
 
+**Промежуточный direct low-loader (реализован):** для малых тестовых EXE при
+`CODE_LOC<#4100` `dss_exe.py` пишет валидный DSS header с `LD_ADDR=PC=#4100`, `LOADER=0`
+и добавляет 17-байтный trampoline (`sprintersdk/loader.asm`) перед C-образом. DSS грузит
+всё тело в `#4100`, trampoline копирует C-образ вниз (`#4111→CODE_LOC`), ставит `SP=#23FF`
+и прыгает в `_entry`. Это закрывает запуск `empty_project`, но не заменяет PRELOAD:
+если loader+code+assets не помещаются до `#FFFF`, сборщик обязан остановиться и требовать
+полный file-reading loader.
+
 Выход из программы — DSS #41 (`LEAVE`): `RST #10`, `B`=код возврата (Execute.ASM:529+).
 
 ---
