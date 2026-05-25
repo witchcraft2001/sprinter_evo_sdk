@@ -1,0 +1,151 @@
+XL
+H 7 areas 46 global symbols
+M evo
+O -mz80
+A _CODE size 1E4 flags 0
+S _mouse_set_start Def0067
+S _select_image Def0187
+S _draw_tile_key Def0151
+S _pal_clear Def00E9
+S _sprites_start_start Def01C1
+S _pal_copy_start Def011D
+S _sample_play_start Def00C1
+S _clear_screen Def017C
+S _sfx_play Def00A9
+S _swap_screen_start Def0184
+S _pal_col_start Def0108
+S _mouse_pos_start Def004F
+S _pal_bright_start Def0100
+S _pal_select_start Def00F8
+S _select_image_start Def0187
+S _time Def01C7
+S _sprites_stop Def01C4
+S _draw_tile_key_start Def0151
+S _pal_clear_start Def00E9
+S _mouse_clip Def0077
+S _joystick Def0042
+S _clear_screen_start Def017C
+S _sfx_play_start Def00A9
+S _vsync Def0040
+S _music_play Def00B6
+S _sfx_stop Def00B3
+S _pal_custom Def0129
+S _draw_tile Def0143
+S _time_start Def01C7
+S _sprites_stop_start Def01C4
+S _mouse_clip_start Def0077
+S _joystick_start Def0042
+S _border Def002B
+S _vsync_start Def0040
+S _set_sprite Def0197
+S _music_play_start Def00B6
+S _sfx_stop_start Def00B3
+S _pal_custom_start Def0129
+S _music_stop Def00BE
+S _color_key Def018F
+S _draw_tile_start Def0143
+S _border_start Def002B
+S _memcpy Def0016
+S _memset Def0000
+S _rand16 Def00C9
+S _set_sprite_start Def0197
+S _delay Def01D3
+S _draw_image Def015F
+S _keyboard Def0045
+S _mouse_delta Def0091
+S _music_stop_start Def00BE
+S _draw_image_extra Def016B
+S _color_key_start Def018F
+S _mouse_set Def0067
+S _sprites_start Def01C1
+S _pal_copy Def011D
+S _sample_play Def00C1
+S _memcpy_start Def0016
+S _memset_start Def0000
+S _rand16_start Def00C9
+S _swap_screen Def0184
+S _pal_col Def0108
+S _mouse_pos Def004F
+S _delay_start Def01D3
+S _pal_bright Def0100
+S _pal_select Def00F8
+S _draw_image_start Def015F
+S _keyboard_start Def0045
+S _mouse_delta_start Def0091
+S _draw_image_extra_start Def016B
+A _DATA size 0 flags 0
+A _OVERLAY size 0 flags 0
+A _HOME size 0 flags 0
+A _GSINIT size 0 flags 0
+A _GSFINAL size 0 flags 0
+A _CABS size 0 flags 0
+T 00 00 21 02 00 39 5E 23 56 23 7E 23 4E 23 46 EB
+R 00 00 00 00
+T 0E 00 54 5D 13 0B 77 C3 4E E1 21 02 00 39 5E 23
+R 00 00 00 00
+T 1C 00 56 D5 23 5E 23 56 23 4E 23 46 EB D1 C3
+R 00 00 00 00
+T 29 00 4E E1 21 02 00 39 7E 32 53 FF 4F E6 07 CB
+R 00 00 00 00
+T 37 00 59 20 03 D3 FE C9 D3 F6 C9 76 C9 C3 67 E2
+R 00 00 00 00
+T 45 00 21 02 00 39 5E 23 56 C3 D1 E2 21 02 00 39
+R 00 00 00 00
+T 53 00 4E 23 46 23 5E 23 56 3A 5A FF 02 3A 5B FF
+R 00 00 00 00
+T 61 00 12 3A 60 FF 6F C9 21 02 00 39 7E 32 5A FF
+R 00 00 00 00
+T 6F 00 23 7E 32 5B FF C3 3C E2 21 02 00 39 7E 32
+R 00 00 00 00
+T 7D 00 5C FF 23 7E 32 5E FF 23 7E 32 5D FF 23 7E
+R 00 00 00 00
+T 8B 00 32 5F FF C3 3C E2 21 02 00 39 4E 23 46 23
+R 00 00 00 00
+T 99 00 5E 23 56 3A 58 FF 02 3A 59 FF 02 3A 60 FF
+R 00 00 00 00
+T A7 00 6F C9 21 02 00 39 46 23 4E C3 32 E3 C3
+R 00 00 00 00
+T B4 00 42 E3 21 02 00 39 7E C3 46 E3 C3 83 E3 21
+R 00 00 00 00
+T C2 00 02 00 39 6E C3 8A E3 2A E5 00 E5 CB 3C CB
+R 00 00 00 00 00 0A 00 00
+T D0 00 1D EB 2A E7 00 19 22 E7 00 7D EE 0F 6F EB
+R 00 00 00 00 00 05 00 00 00 09 00 00
+T DE 00 E1 ED 52 22 E5 00 C9 01 00 05 00 21 40 FF
+R 00 00 00 00 00 06 00 00
+T EC 00 01 00 10 71 2C 10 FC 7C 32 56 FF C9 21
+R 00 00 00 00
+T F9 00 02 00 39 7E C3 CC E1 21 02 00 39 7E C3
+R 00 00 00 00
+T 06 01 E3 E1 21 02 00 39 7E 23 4E 21 40 FF 85 6F
+R 00 00 00 00
+T 14 01 79 E6 3F 77 7C 32 56 FF C9 21 02 00 39 7E
+R 00 00 00 00
+T 22 01 23 5E 23 56 C3 FD E1 21 02 00 39 7E 23 66
+R 00 00 00 00
+T 30 01 6F 11 40 FF 06 10 7E E6 3F 12 23 1C 10 F8
+R 00 00 00 00
+T 3E 01 7A 32 56 FF C9 21 02 00 39 4E 23 46 23 5E
+R 00 00 00 00
+T 4C 01 23 56 C3 46 E6 21 02 00 39 4E 23 46 23 5E
+R 00 00 00 00
+T 5A 01 23 56 C3 8B E7 21 02 00 39 4E 23 46 23 7E
+R 00 00 00 00
+T 68 01 C3 86 E8 21 02 00 39 4E 23 46 23 7E 23 5E
+R 00 00 00 00
+T 76 01 23 56 37 C3 86 E8 21 02 00 39 7E C3 51 E1
+R 00 00 00 00
+T 84 01 C3 7B E1 21 02 00 39 6E C3 15 E6 21 02 00
+R 00 00 00 00
+T 92 01 39 4E C3 5D E7 21 02 00 39 7E 23 4E 23 46
+R 00 00 00 00
+T A0 01 23 5E 23 56 87 87 6F 26 FB 7A FE FF 28 03
+R 00 00 00 00
+T AE 01 87 82 57 3A 57 FF E6 02 20 01 24 72 2C 73
+R 00 00 00 00
+T BC 01 2C 70 2C 71 C9 C3 8A EA C3 DF EA 21 66 FF
+R 00 00 00 00
+T CA 01 56 2B 5E 2B 7E 2B 6E 67 C9 21 02 00 39 4E
+R 00 00 00 00
+T D8 01 23 46 78 B1 C8 76 0B 78 B1 20 FA C9
+R 00 00 00 00
