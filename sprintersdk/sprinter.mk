@@ -18,6 +18,11 @@ include $(SDK_DIR)toolchain.mk
 PROJECT  ?= .
 OUT      ?= app
 BUILD    ?= $(PROJECT)/_build
+MANIFEST ?= $(PROJECT)/compile.bat
+RESGEN   ?= $(SDK_DIR)tools/resgen.py
+ASSETPACK ?= $(SDK_DIR)tools/assetpack.py
+RESOURCES_H ?= $(PROJECT)/resources.h
+ASSETS_DAT ?= $(BUILD)/assets.dat
 
 # Scheme C
 CODE_LOC ?= 0x2400
@@ -27,8 +32,17 @@ CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 # crt0 должен идти первым в линковке (=> _entry на code-loc)
 OBJS := $(BUILD)/crt0.rel $(BUILD)/main.rel
 
-.PHONY: all clean
-all: $(BUILD)/$(OUT).ihx
+.PHONY: all clean resources assets
+all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
+
+resources: $(RESOURCES_H)
+assets: $(ASSETS_DAT)
+
+$(RESOURCES_H): $(MANIFEST) $(RESGEN)
+	$(PYTHON) $(RESGEN) $(MANIFEST) -o $@
+
+$(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) | $(BUILD)
+	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)
@@ -47,7 +61,7 @@ $(BUILD)/crt0.rel: $(SDK_DIR)crt0.s | $(BUILD)
 	cp $@ $(basename $@).o
 
 # --- C (.c) -> .rel (в три шага, см. шапку) ---
-$(BUILD)/main.rel: $(PROJECT)/main.c | $(BUILD)
+$(BUILD)/main.rel: $(PROJECT)/main.c $(RESOURCES_H) | $(BUILD)
 	$(SDCPP) $(CPPFLAGS) $< > $(BUILD)/main.i
 	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/main.asm < $(BUILD)/main.i
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/main.asm
