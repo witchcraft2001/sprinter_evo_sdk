@@ -21,8 +21,14 @@ BUILD    ?= $(PROJECT)/_build
 MANIFEST ?= $(PROJECT)/compile.bat
 RESGEN   ?= $(SDK_DIR)tools/resgen.py
 ASSETPACK ?= $(SDK_DIR)tools/assetpack.py
+PACKSPK  ?= $(SDK_DIR)tools/pack_spk.py
+DSS_EXE  ?= $(SDK_DIR)tools/dss_exe.py
+MHMT     ?= $(SDK_DIR)tools/bin/mhmt
+PACK_ASSETS ?= 0
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
+ASSETS_RAW ?= $(BUILD)/assets.raw.dat
+EXE      ?= $(BUILD)/$(OUT).exe
 
 # Scheme C
 CODE_LOC ?= 0x2400
@@ -32,17 +38,32 @@ CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 # crt0 должен идти первым в линковке (=> _entry на code-loc)
 OBJS := $(BUILD)/crt0.rel $(BUILD)/main.rel
 
-.PHONY: all clean resources assets
+.PHONY: all clean resources assets exe
 all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
 
 resources: $(RESOURCES_H)
 assets: $(ASSETS_DAT)
+exe: $(EXE)
 
 $(RESOURCES_H): $(MANIFEST) $(RESGEN)
 	$(PYTHON) $(RESGEN) $(MANIFEST) -o $@
 
+ifeq ($(PACK_ASSETS),1)
+$(ASSETS_RAW): $(MANIFEST) $(ASSETPACK) | $(BUILD)
+	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
+
+$(ASSETS_DAT): $(ASSETS_RAW) $(PACKSPK)
+	$(PYTHON) $(PACKSPK) --mhmt $(MHMT) $< $@
+else
 $(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) | $(BUILD)
 	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
+endif
+
+# Direct DSS EXE requires CODE_LOC >= 0x4100. The current Scheme C default
+# (0x2400) needs the Stage 2 loader, so this target is intentionally separate
+# from `all` and dss_exe.py will reject the low-load case.
+$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE)
+	$(PYTHON) $(DSS_EXE) $< $@ --load $(CODE_LOC) --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT)
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)

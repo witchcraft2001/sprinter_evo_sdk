@@ -69,4 +69,5 @@ assets.dat
 !evosdk/startup.h
 !evosdk/ENV.DAT
 !evosdk/NOTAS.DAT
+!sprintersdk/tools/bin/hrust.exe
 */_build/*
