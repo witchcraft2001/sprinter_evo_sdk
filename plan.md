@@ -128,6 +128,14 @@
       читаемость селекторов `#82/#C2`; селективный линк хелперов через `.lib` (сейчас
       линкуются все ~1–2 КБ) — опциональная оптимизация. time тикает только на vsync (IM2
       ещё нет — Этап 5).
+      → **Рефакторинг по зонам ответственности (CLAUDE.md §2.1):** `lib_startup.asm`
+      разнесён на файлы как в `evosdk/`: `lib_startup.asm` (рантайм/видео/палитра/screen/
+      misc/asset-find), `lib_tiles.asm` (`select_image`/`draw_tile`/`draw_tile_key`/
+      `draw_image`/`color_key`), `lib_sprites.asm`, `lib_input.asm`, `lib_sound.asm`.
+      Общие хелперы (`begin/end_vram_write`, `find_asset_record`, `_asset_found_record`)
+      экспортируются из `lib_startup`. Собираются отдельными `.rel` и линкуются (вместо
+      `INCLUDE`, как в EvoSDK — адаптация под раздельную компиляцию). Сборка обоих проектов
+      проверена: межфайловые символы резолвятся, дублей нет.
 - 🟦 `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
       загрузчиком** (`LOADER`@8, PRELOAD; референс `kode/KodeEXE.asm`, см. `HW_NOTES.md`
       §9.1): DSS грузит loader, тот берёт FM из `PSP[IX-3]`, `BIOS.GetMem` страницы,
@@ -147,6 +155,38 @@
       Ограничение осознанное: loader не PRELOAD, поэтому тело должно помещаться до
       `#FFFF`; `example_sprites` с ассетами корректно отвергается с требованием полного
       PRELOAD file-reading loader.
+      → **PRELOAD-загрузчик, инкремент 1/N — постраничный бандл (фундамент):**
+      `assetpack.py --paged` выдаёт формат **`EVP1`** (`HW_NOTES.md` §15) с O(1)-доступом:
+      payload по 16 КБ страницам (gfx/spr/pal/mus/smp/sfx), per-type ID-индексированные
+      таблицы метаданных (`IMG{base_tile,wt,ht}`, `PAL{page,off}`, `SMP{page,off,len,cbl}`…).
+      Проверено на game_xnx (45 страниц, gfx 39, таблицы/смещения/спан сэмплов по страницам
+      сверены). Флаг `--paged`; плоский путь сохранён (без поломки сборки).
+      → **PRELOAD-загрузчик + CACHE boot-путь — РЕАЛИЗОВАН (M1), статически проверен.**
+      Заземлён на первоисточниках (`Execute.ASM`/`GetMem`/`Read` + рабочий `evosdk_libs/
+      sprinter`), см. `HW_NOTES.md` §9.2. **Важно: старый low-loader был сломан на железе**
+      (копировал C-образ в `#2400` = WIN0 = живая системная страница DSS) — заменён.
+      Реализовано:
+      • `loader.asm` — PRELOAD-загрузчик (295 Б, в WIN1/#4100): FM из `(IX-3)`, читает
+        мини-заголовок, **DSS-init (SetVMod #81) в загрузчике** (решение архитектора —
+        рантайм в SRAM без DSS-вызовов), `GetMem`+`Dss.Read` 4 код-чанка (chunk0→SRAM/hot,
+        1→WIN1, 2→WIN2, 3→WIN3) + M ассет-страниц через WIN2, рантайм-таблицы в WIN2
+        `#B000`, **CACHE on** (`OUT#8F,0`/`IN#FB`) + `LDIR` chunk0→SRAM, `JP #2400`.
+      • `crt0.s` — пролог `out (#A2),a` (WIN1 от загрузчика) + `SP=#23FF`; выход через
+        `_evo_runtime_shutdown`.
+      • `lib_startup.asm` — `_evo_runtime_init` без DSS-вызовов; `_evo_runtime_shutdown` =
+        PI-трамплин, копируется в DRAM `#B800`, CACHE off (`IN#7B`), восстановление
+        vmode/SLOT0 из `#B400`, `Dss.Exit` (калька `evo_exit.s`).
+      • `dss_exe.py --monoblock --loader` — собирает header(`LOADER`@8) + loader +
+        [мини-hdr][4×16К чанка][meta][M×16К страниц]; `tools/ihx2bin.py`; `sprinter.mk`
+        собирает `loader.bin` и зовёт монолит; `assetpack --paged` (EVP1).
+      Проверено статически: `empty_project` → валидный EXE (66359 Б), заголовок/мини-hdr/
+      `out(#A2),a`@`#2400`/резерв `#B000` корректны. **Рантайм-проверка — на эмуляторе.**
+      **Дальше (M2 — постраничный рендер, цель example_sprites):** area-split (SDK-код →
+      `_SDK`@`#0000` чтобы `draw_tile` из SRAM мог свапать WIN1/WIN3), рантайм-таблицы SDK
+      (палитра/таблица изображений/`page_table`) на фикс. адреса WIN2 `#B000+`, переделка
+      `select_image`/`pal_select`/`draw_tile` на EVP1-индекс + map page (удалить
+      `find_asset_record`), сверить парсинг EVP1-meta. **M3:** HRUST Z80-депакер
+      (`kode/DEPACK`) — сжатие on.
 - ⬜ `Makefile` (SDK-уровня и проектного уровня): сборка `evo.c` + asm-библиотек + crt0 +
       ассетов в EXE. Команда сборки проекта — одна `make`-цель.
 - ⬜ `sprintersdk/evo.h`: тот же API, что `evosdk/evo.h` (идентичные сигнатуры/константы).
@@ -156,13 +196,33 @@ Sprinter** (чёрный экран, не падает, отрабатывает
 
 ---
 
-## Этап 3. Графика: палитра, тайлы, изображения ⬜
+## Этап 3. Графика: палитра, тайлы, изображения 🟦
 
-- ⬜ `lib_startup.asm` (палитра): `pal_clear/bright/select/copy/col/custom` — конвертация
+- 🟦 `lib_startup.asm` (палитра): `pal_clear/bright/select/copy/col/custom` — конвертация
       RGB222→формат палитры Sprinter, применение яркости. Референс приёма — `evosdk_libs`.
+      → Реализованы asm-пути `pal_clear`, `pal_bright`, `pal_col`, `pal_custom` и
+      временный `pal_copy` текущей 16-цветной палитры. Вывод идёт напрямую через
+      подтверждённый протокол `WIN3=#50`, `PORT_Y=index`, `#C3E0/#C3E1/#C3E2=RGB6<<2`;
+      яркость 0..6: 0=чёрный, 3=нормальный RGB222, 6=белый. `pal_select(id)` ждёт
+      runtime asset table/loader, чтобы брать предопределённые PAL из `EVOS`.
 - ⬜ `lib_tiles.asm`: `select_image`, `draw_tile`, `draw_tile_key`, `draw_image`,
       `clear_screen` — вывод в VRAM. **Горячие циклы — в SRAM-кэш (WIN0).**
       `clear_screen`/крупные блиты — через **accel** (блоки >12 байт).
+      → Начат перенос: `clear_screen(color)` реализован в asm через Sprinter accel
+      (`LD D,D` + два `LD C,C` fill по 160 байт на строку), пишет в теневой буфер
+      (`RGMOD^1`) через `WIN3=#50`, `PORT_Y=0..255`, затем возвращает `PORT_Y=#C0` и
+      восстанавливает WIN3. Runtime init очищает оба буфера A/B в чёрный после установки
+      видеорежима для обеих страниц.
+      → Добавлен runtime-доступ к `EVOS` assets для low-loader EXE: `dss_exe.py` патчит
+      `_evos_assets_ptr/_evos_assets_len` по `.map`; `pal_select/pal_copy` читают PAL-записи,
+      `select_image` читает IMG-запись, `draw_tile` рисует 8×8 в теневой буфер развёрнутыми
+      `LDI` (без accel, 8 Б < порога), `draw_image` выводит изображение row-major через
+      `draw_tile`. `draw_tile_key` пока использует unkeyed-путь до флага `color_key.N/#58`.
+      - ⬜ **TODO: переписать очистку экрана через accel вертикальную заливку (`LD E,E`)**
+        вместо горизонтальной (`LD C,C`). Сейчас: 256× `PORT_Y` + 512 пульсов (2×160/строку).
+        Вертикальная заливка (`#5B`-режим accel, см. `HW_NOTES.md` §4) должна закрывать
+        столбцы за проход — меньше переключений `PORT_Y`/пульсов → быстрее clear. Сверить
+        точную семантику `LD E,E`/шаг на железе/в рабочем коде.
 - ⬜ `draw_tile_key` — **аппаратные keyed-тайлы через `#58`** (теперь подтверждён, §7.1):
       манифест `set color_key.N=K` → `assetpack` ремапит `K→0xFF` + флаг `hw_keyed`;
       рантайм рисует через `WIN3=#58` тем же быстрым `LDI`-burst (~6× быстрее, зеркало

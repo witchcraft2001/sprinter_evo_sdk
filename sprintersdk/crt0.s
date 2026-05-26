@@ -26,19 +26,19 @@
 
         .area   _CODE
 _entry::
+        ; Entry from the PRELOAD loader (loader.asm): CACHE on (WIN0=SRAM = this
+        ; code), A = the physical page the loader staged for WIN1. Map it, set
+        ; the Scheme C stack, then run C. See HW_NOTES §9.2.
+        out     (#0xA2), a            ; WIN1 = code chunk1 page
+        ld      sp, #0x23FF
         call    gsinit
         call    _evo_runtime_init
         call    _main
 
-        push    hl
+        ; Exit code 0. _evo_runtime_shutdown copies a DRAM trampoline, turns
+        ; CACHE off and does DSS.Exit -- it does not return.
+        ld      l, #0
         call    _evo_runtime_shutdown
-        pop     hl
-
-        ; DSS.Exit. Когда SDK будет перенесён в SRAM/cache, этот RST уйдёт в
-        ; трамплин cache off -> ROM -> RST -> cache on/exit.
-        ld      b, l
-        ld      c, #0x41
-        rst     #0x10
         di
         halt
 

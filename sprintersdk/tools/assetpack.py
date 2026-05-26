@@ -316,11 +316,179 @@ def write_bundle(records: list[Record], output: Path) -> None:
     tmp.replace(output)
 
 
+# =========================================================================
+#  EVP1 -- paged asset bundle for the PRELOAD loader (O(1) access model).
+# =========================================================================
+#  Goal (HW_NOTES §15): the SDK reaches any asset in O(1) -- no runtime
+#  search, no flat-pointer arithmetic across >64KB. Payloads are laid into
+#  16KB DSS pages by resource class (EvoSDK model); per-type ID-indexed
+#  metadata tables (small) are copied to RAM by the loader so `select_image`/
+#  `pal_select`/... do `table_base + id*stride` then map one page.
+#
+#  File layout:
+#    header (16 B):
+#      u32 magic 'EVP1'
+#      u8  num_pages         total payload pages (loader GetMem's this many)
+#      u8  gfx_pages         #pages of the tile region == sprite-page base idx
+#      u16 meta_off          file offset of the metadata blob
+#      u16 meta_size
+#      u16 pages_off         file offset of the page blobs (num_pages * 16KB)
+#      u16 sprite_count
+#      pad to 16
+#    metadata blob (-> RAM):
+#      u8 img_count;  img_count  * { u16 base_tile, u8 w_tiles, u8 h_tiles }
+#      u8 pal_count;  pal_count  * { u8 page, u16 offset }
+#      u8 mus_count;  mus_count  * { u8 page, u16 offset, u16 len }
+#      u8 smp_count;  smp_count  * { u8 page, u16 offset, u16 len, u8 cbl }
+#      u8 sfx_present; [ u8 page, u16 offset, u16 len ]
+#    page blobs: num_pages * 16KB, in region order gfx|spr|pal|mus|smp|sfx.
+#
+#  Access (SDK, all O(1)):
+#    image:   base_tile = img[id].base_tile; global = base_tile + tile;
+#             page = page_table[global >> 8]; off = (global & 255) * 64.
+#    sprite:  page = page_table[gfx_pages + (id >> 6)]; off = (id & 63) * 256.
+#    palette: page = page_table[pal[id].page]; off = pal[id].offset.
+#    (mus/smp/sfx similar; samples may span pages -- player walks them.)
+# =========================================================================
+
+PAGE = 16384
+EVP_MAGIC = b"EVP1"
+EVP_HEADER_SIZE = 16
+
+
+def _pad_to_page(blob: bytearray) -> None:
+    if len(blob) % PAGE:
+        blob += bytes(PAGE - (len(blob) % PAGE))
+
+
+def build_paged(manifest: Path) -> tuple[bytes, bytes]:
+    """Return (metadata_blob, page_data). page_data is num_pages*16KB in the
+    region order gfx|spr|pal|mus|smp|sfx; metadata page indices are global."""
+    entries, soundfx = parse_compile_bat(manifest)
+
+    # --- tiles: concatenate every image's tiles, 256 tiles (16KB) per page ---
+    gfx = bytearray()
+    img_table: list[tuple[int, int, int]] = []      # (base_tile, w_tiles, h_tiles)
+    for _v, path in entries["image"]:
+        payload, w, h = pack_image(path)
+        # base_tile is u16 (global tile index, EvoSDK IMGLIST.tile). w/h tiles
+        # are u8 like makeresh: only used by draw_image, which can't exceed the
+        # 40x32 screen anyway. Big tilesheets (e.g. an 1x258 mask strip) are
+        # drawn by tile index, so clamp their unused dims rather than wrap.
+        img_table.append((len(gfx) // 64, min(w // 8, 255), min(h // 8, 255)))
+        gfx += payload
+    _pad_to_page(gfx)
+    gfx_pages = len(gfx) // PAGE
+
+    # --- sprites: concatenate cells, 64 cells (16KB) per page ---
+    spr = bytearray()
+    sprite_id = 0
+    for _v, path in entries["sprite"]:
+        recs, declared = pack_sprites(path, sprite_id)
+        for r in recs:
+            spr += r.data
+        sprite_id += declared
+    sprite_count = sprite_id
+    _pad_to_page(spr)
+    spr_base = gfx_pages
+
+    # --- palettes / music / samples / sfx: packed, never split an entry
+    #     across a page boundary (so page+offset addressing is exact) ---
+    def pack_region(items, base_page):
+        blob = bytearray()
+        table = []
+        for data in items:
+            if len(blob) % PAGE + len(data) > PAGE and len(data) <= PAGE:
+                _pad_to_page(blob)
+            table.append((base_page + len(blob) // PAGE, len(blob) % PAGE, len(data)))
+            blob += data
+        _pad_to_page(blob)
+        return blob, table
+
+    pal_items = [pack_palette(p) for _v, p in entries["palette"]]
+    pal_blob, pal_tab = pack_region(pal_items, spr_base + len(spr) // PAGE)
+
+    mus_items = []
+    for _v, path in entries["music"]:
+        if not path.exists():
+            raise SystemExit(f"assetpack: {path}: music file not found")
+        mus_items.append(path.read_bytes())
+    mus_base = spr_base + len(spr) // PAGE + len(pal_blob) // PAGE
+    mus_blob, mus_tab = pack_region(mus_items, mus_base)
+
+    smp_items, smp_cbl = [], []
+    for _v, path in entries["sample"]:
+        pcm, rate = parse_wav(path)
+        smp_items.append(pcm)
+        smp_cbl.append(cbl_ctrl_for_rate(rate))
+    smp_base = mus_base + len(mus_blob) // PAGE
+    smp_blob, smp_tab = pack_region(smp_items, smp_base)
+
+    sfx_items = []
+    if soundfx is not None:
+        if not soundfx.exists():
+            raise SystemExit(f"assetpack: {soundfx}: soundfx bank not found")
+        sfx_items.append(soundfx.read_bytes())
+    sfx_base = smp_base + len(smp_blob) // PAGE
+    sfx_blob, sfx_tab = pack_region(sfx_items, sfx_base)
+
+    page_data = bytes(gfx + spr + pal_blob + mus_blob + smp_blob + sfx_blob)
+    num_pages = len(page_data) // PAGE
+
+    # --- metadata blob ---
+    meta = bytearray()
+    meta.append(len(img_table))
+    for base_tile, wt, ht in img_table:
+        meta += struct.pack("<HBB", base_tile, wt, ht)
+    meta.append(len(pal_tab))
+    for page, off, _ln in pal_tab:
+        meta += struct.pack("<BH", page, off)
+    meta.append(len(mus_tab))
+    for page, off, ln in mus_tab:
+        meta += struct.pack("<BHH", page, off, ln)
+    meta.append(len(smp_tab))
+    for (page, off, ln), cbl in zip(smp_tab, smp_cbl):
+        meta += struct.pack("<BHHB", page, off, ln, cbl)
+    if sfx_tab:
+        meta.append(1)
+        page, off, ln = sfx_tab[0]
+        meta += struct.pack("<BHH", page, off, ln)
+    else:
+        meta.append(0)
+
+    header = bytearray(EVP_HEADER_SIZE)
+    header[0:4] = EVP_MAGIC
+    header[4] = num_pages
+    header[5] = gfx_pages
+    struct.pack_into("<H", header, 6, EVP_HEADER_SIZE)              # meta_off
+    struct.pack_into("<H", header, 8, len(meta))                   # meta_size
+    struct.pack_into("<H", header, 10, EVP_HEADER_SIZE + len(meta))  # pages_off
+    struct.pack_into("<H", header, 12, sprite_count)
+    return bytes(header) + bytes(meta), page_data
+
+
+def write_paged_bundle(manifest: Path, output: Path) -> None:
+    head_meta, page_data = build_paged(manifest)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_name(output.name + ".tmp")
+    tmp.write_bytes(head_meta + page_data)
+    tmp.replace(output)
+    num_pages = page_data and len(page_data) // PAGE or 0
+    print(f"assetpack: wrote {output} (EVP1, {num_pages} pages, "
+          f"meta {len(head_meta) - EVP_HEADER_SIZE} B)")
+
+
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Build Sprinter EvoSDK EVOS asset bundle")
+    parser = argparse.ArgumentParser(description="Build Sprinter EvoSDK asset bundle")
     parser.add_argument("manifest", type=Path, help="project compile.bat")
     parser.add_argument("-o", "--output", type=Path, default=Path("assets.dat"), help="output bundle")
+    parser.add_argument("--paged", action="store_true",
+                        help="emit the EVP1 paged bundle for the PRELOAD loader")
     args = parser.parse_args(argv)
+
+    if args.paged:
+        write_paged_bundle(args.manifest, args.output)
+        return 0
 
     records = make_records(args.manifest)
     write_bundle(records, args.output)

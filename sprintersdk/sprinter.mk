@@ -29,7 +29,10 @@ RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
 ASSETS_RAW ?= $(BUILD)/assets.raw.dat
 EXE      ?= $(BUILD)/$(OUT).exe
-LOADER_LOC ?= 0x4100
+IHX2BIN  ?= $(SDK_DIR)tools/ihx2bin.py
+LOADER_SRC ?= $(SDK_DIR)loader.asm
+LOADER_BIN ?= $(BUILD)/loader.bin
+LOADER_ORG ?= 0x4100
 
 # Scheme C
 CODE_LOC ?= 0x2400
@@ -41,7 +44,10 @@ CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 # подтягивает z80-lib SDCC, поэтому линкуем их явно (historical SDCC runtime).
 SDCC290_RTL := compat div divsigned divulong mod modulong mul mullong shift
 RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
-OBJS := $(BUILD)/crt0.rel $(BUILD)/lib_startup.rel $(BUILD)/main.rel $(RTL_RELS)
+# SDK libraries by EvoSDK responsibility zone (mirror of evosdk/ file names).
+SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound
+LIB_RELS := $(patsubst %,$(BUILD)/%.rel,$(SDK_LIB))
+OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/main.rel $(RTL_RELS)
 
 .PHONY: all clean resources assets exe
 all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
@@ -61,14 +67,25 @@ $(ASSETS_DAT): $(ASSETS_RAW) $(PACKSPK)
 	$(PYTHON) $(PACKSPK) --mhmt $(MHMT) $< $@
 else
 $(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) | $(BUILD)
-	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
+	$(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
 endif
 
-# Direct DSS EXE requires LD_ADDR >= 0x4100. For Scheme C CODE_LOC=0x2400,
-# dss_exe.py emits the current Stage 2 low-loader at LOADER_LOC: DSS loads
-# loader+code there, the loader copies the C image down to CODE_LOC and jumps.
-$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE)
-	$(PYTHON) $(DSS_EXE) $< $@ --load $(CODE_LOC) --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) --low-loader-load $(LOADER_LOC)
+# --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
+$(BUILD)/loader.rel: $(LOADER_SRC) | $(BUILD)
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
+	cp $@ $(basename $@).o
+
+$(LOADER_BIN): $(BUILD)/loader.rel
+	@printf '%s\n' '-mjx' '-i $(BUILD)/loader.ihx' '-b _CODE = $(LOADER_ORG)' '$(BUILD)/loader.o' '-e' > $(BUILD)/loader.lk
+	$(SDLDZ80) -n -f $(BUILD)/loader.lk
+	$(PYTHON) $(IHX2BIN) $(BUILD)/loader.ihx $@
+
+# Monoblock DSS PRELOAD EXE: header + loader + paged code/assets inside.
+# DSS loads only the loader (#4100/WIN1); it stages code into pages, copies the
+# hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
+$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN)
+	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
+	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT)
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)
@@ -86,7 +103,8 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
 	cp $@ $(basename $@).o
 
-$(BUILD)/lib_startup.rel: $(SDK_DIR)lib_startup.asm | $(BUILD)
+# --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
+$(BUILD)/%.rel: $(SDK_DIR)%.asm | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
 	cp $@ $(basename $@).o
 
