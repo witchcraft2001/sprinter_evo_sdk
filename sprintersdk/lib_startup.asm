@@ -33,6 +33,7 @@
         .globl  begin_vram_write
         .globl  end_vram_write
         .globl  _vram_base              ; back buffer base (#C000/#C140), set by begin_vram_write
+        .globl  _sprites_render_before_swap
 
         .area   _SDK
 
@@ -186,17 +187,41 @@ _border::
         ret
 
 _vsync::
-        ; Phase 1 graphics tests must not initialize CBL here. Proper VSync will
-        ; move to the IM2/frame handler; for now keep a bounded delay and tick.
-        ld      de, #0x4000
-1$:
+        ; Real frame sync by polling #FFFE bit 5 (1 while Y>256 = bottom blank,
+        ; 0 for Y<256). Wait for the high->low edge so callers resume at frame
+        ; start. Sprinter only toggles this bit while CBL is active, so arm CBL
+        ; in idle mode (#80 -> #004E) first. Pure polling -- DI-safe (Phase 1
+        ; stays fully DI; no EI/HALT, see HW_NOTES §7.1). Ref:
+        ; evosdk_libs/sprinter/lib/video_vsync.s, HW_NOTES §6.4.
+        ld      bc, #0x004E             ; CBL_CTRL: idle-on keeps #FE.5 toggling
+        ld      a, #0x80
+        out     (c), a
+        ld      de, #0x8000             ; timeout guard so we never hang
+1$:                                     ; wait until bit5 = 1 (into blank)
+        ld      a, #0xFF
+        in      a, (#0xFE)
+        bit     5, a
+        jr      nz, 2$
         dec     de
         ld      a, d
         or      e
         jr      nz, 1$
+        jp      inc_time_counter        ; timeout: tick and return, do not hang
+2$:                                     ; wait until bit5 = 0 (frame start)
+        ld      de, #0x8000
+3$:
+        ld      a, #0xFF
+        in      a, (#0xFE)
+        bit     5, a
+        jp      z, inc_time_counter
+        dec     de
+        ld      a, d
+        or      e
+        jr      nz, 3$
         jp      inc_time_counter
 
 _swap_screen::
+        call    _sprites_render_before_swap
         call    _vsync
         in      a, (#0xC9)              ; flappybird model: read current RGMOD.0
         xor     #0x01
