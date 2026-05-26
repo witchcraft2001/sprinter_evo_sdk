@@ -166,27 +166,78 @@
       sprinter`), см. `HW_NOTES.md` §9.2. **Важно: старый low-loader был сломан на железе**
       (копировал C-образ в `#2400` = WIN0 = живая системная страница DSS) — заменён.
       Реализовано:
-      • `loader.asm` — PRELOAD-загрузчик (295 Б, в WIN1/#4100): FM из `(IX-3)`, читает
+      • `loader.asm` — PRELOAD-загрузчик (278 Б, **в WIN2/#8100, SP #BFFF** — канонич.
+        адрес DSS-программы; WIN1 = скрэтч BIOS, `SetVMod`→`WIN_OPEN` его затирает, поэтому
+        загрузчик НЕ в WIN1 — подтверждено на эмуляторе): FM из `(IX-3)`, читает
         мини-заголовок, **DSS-init (SetVMod #81) в загрузчике** (решение архитектора —
-        рантайм в SRAM без DSS-вызовов), `GetMem`+`Dss.Read` 4 код-чанка (chunk0→SRAM/hot,
-        1→WIN1, 2→WIN2, 3→WIN3) + M ассет-страниц через WIN2, рантайм-таблицы в WIN2
-        `#B000`, **CACHE on** (`OUT#8F,0`/`IN#FB`) + `LDIR` chunk0→SRAM, `JP #2400`.
-      • `crt0.s` — пролог `out (#A2),a` (WIN1 от загрузчика) + `SP=#23FF`; выход через
+        рантайм в SRAM без DSS-вызовов), `GetMem`+`Dss.Read` 4 код-чанка + M ассет-страниц
+        **через WIN1** (`#4000`). **Таблицы SDK (`page_table`@`#1A00`, `saved_vmode`@`#1A40`,
+        EVP1-meta@`#1B00`) — в SRAM-регионе SDK** (зеркало EvoSDK `#FB00+`), пишутся в chunk0
+        через WIN1-стейджинг до `LDIR`. **CACHE on** + `LDIR` chunk0→SRAM; загрузчик мапит
+        WIN1=chunk1, WIN3=chunk3; `LD A,chunk2`; `JP #2400`.
+      • `crt0.s` — пролог `out (#C2),a` (WIN2=chunk2 от загрузчика) + `SP=#23FF`; выход через
         `_evo_runtime_shutdown`.
       • `lib_startup.asm` — `_evo_runtime_init` без DSS-вызовов; `_evo_runtime_shutdown` =
-        PI-трамплин, копируется в DRAM `#B800`, CACHE off (`IN#7B`), восстановление
-        vmode/SLOT0 из `#B400`, `Dss.Exit` (калька `evo_exit.s`).
+        PI-трамплин, **транзитно** копируется в WIN2 DRAM (C завершён), `saved_vmode`
+        читается из SRAM до cache-off; CACHE off (`IN#7B`) → restore vmode → `Dss.Exit`.
+        SLOT0/IM не трогаем (DSS не зависит; cache-toggle не меняет SLOT0).
       • `dss_exe.py --monoblock --loader` — собирает header(`LOADER`@8) + loader +
         [мини-hdr][4×16К чанка][meta][M×16К страниц]; `tools/ihx2bin.py`; `sprinter.mk`
         собирает `loader.bin` и зовёт монолит; `assetpack --paged` (EVP1).
-      Проверено статически: `empty_project` → валидный EXE (66359 Б), заголовок/мини-hdr/
-      `out(#A2),a`@`#2400`/резерв `#B000` корректны. **Рантайм-проверка — на эмуляторе.**
-      **Дальше (M2 — постраничный рендер, цель example_sprites):** area-split (SDK-код →
-      `_SDK`@`#0000` чтобы `draw_tile` из SRAM мог свапать WIN1/WIN3), рантайм-таблицы SDK
-      (палитра/таблица изображений/`page_table`) на фикс. адреса WIN2 `#B000+`, переделка
-      `select_image`/`pal_select`/`draw_tile` на EVP1-индекс + map page (удалить
-      `find_asset_record`), сверить парсинг EVP1-meta. **M3:** HRUST Z80-депакер
-      (`kode/DEPACK`) — сжатие on.
+      Проверено статически: `empty_project` → валидный EXE, заголовок/мини-hdr/
+      `out(#A2),a`@`#2400` корректны. **Рантайм-проверка — на эмуляторе.**
+      → **M2a — постраничный рендер тайлов/изображений + палитра — РЕАЛИЗОВАН,
+      статически проверен. Раскладка — зеркало EvoSDK (исправлено после ревью архитектора:
+      `#B000`/WIN2 убран как заимствование из `evosdk_libs`).** Код SDK → `_SDK`@`#0100`
+      (SRAM, как EvoSDK `#E000+`; `#0000–#00FF` под RST/IM2-векторы Фазы 2 — sdld игнорирует
+      `-b` базу 0), данные SDK → `_SDKDATA`@`#1600` (SRAM), таблицы загрузчика
+      `page_table`@`#1A00`/`saved_vmode`@`#1A40`/EVP1-meta@`#1B00` (SRAM, зеркало `#FB00+`),
+      стек `#2000–#23FF`, **C — единый непрерывный блок `#2400–#FFFF`** (без `-b _DATA`,
+      бюджет = 56320 Б EvoSDK). WIN0 рендер не ремапит → таблицы/scratch всегда доступны.
+      • `select_image`/`draw_tile`/`draw_image`: EVP1 O(1) — `global=base_tile+tile`,
+        `page=page_table[global>>8]` (map в WIN1, save/restore), `off=(global&255)*64`.
+      • `pal_select`/`pal_copy`: EVP1 — `map_palette_page` (pal-страница в WIN1),
+        `copy_palette_payload` (формат payload не менялся), restore WIN1, apply.
+      • `evo_meta_init` (из `runtime_init`) кэширует базу pal-таблицы; img-таблица на
+        фикс. `#1B11`. `find_asset_record`/`_evos_assets_*` удалены.
+      Проверено по .map: render-код в SRAM (`draw_tile`@`#0446` < `#1600`); ничего в
+      `#1A00–#23FF`; C непрерывен от `#2400`. Сборка всех проектов ОК; game_xnx код
+      `#2400–#5B06`. **Визуальный тест M2a — `example_slideshow`** (фон + палитра, без
+      спрайтов): должен показать фон с фейдом. **Рантайм — на эмуляторе.**
+      ⚠ Ограничение: SDK код+данные должны держаться ниже `#1A00` (резерв таблиц);
+      EVP1-meta ≤ 1 КБ (`#1B00–#1EFF`). dss_exe проверяет оба.
+      → **Фиксы по итогам прогона на эмуляторе (архитектор):**
+      1. **Загрузчик перенесён в WIN2 (`#8100`, SP `#BFFF`)** — `#4100`/WIN1 убивался первым
+         `SetVMod` (`BIOS.WIN_OPEN` использует WIN1 как скрэтч; канонич. адрес DSS-программы
+         `#8100`). Стейджинг → через WIN1; crt0 мапит WIN2 (`out (#C2),a`). slides загрузилась.
+      2. **`map_palette_page` (pal_select/pal_copy): логич. страница `page` из EVP1-meta
+         резолвилась как физическая** (`out (#A2),page`) минуя `page_table` — палитра читалась
+         из чужой физ.страницы (мусор). Исправлено: `page_table[page]` (как в `draw_tile`).
+      3. **`EI` при CACHE on = краш** (подтверждено: «после 2х call память портится,
+         мерцает чёрный/белый»). При CACHE on WIN0=SRAM, поэтому вектор IM1 `#0038` (и
+         таблица IM2) — это SRAM-мусор, не DSS. Первое же кадровое прерывание после `EI` →
+         прыжок в `#0038` → краш. Убраны ВСЕ `ei` из SDK (Фаза 1 = **полностью DI**, vsync
+         опрашивается, не по прерыванию): `runtime_init`, `fill_row_320` (accel ×2),
+         таймаут `vsync` (`ei;halt`→bounded delay). CBL здесь не инициализируется:
+         графический тест должен зависеть от `SetVMod` в loader, а не от CBL-хаков.
+         IM2+EI — Фаза 2 (звук/время), когда обработчик будет в SRAM.
+      4. **Модель двойного буфера + палитра** (много итераций на железе с архитектором;
+         финал сверяем с flappybird). Loader вызывает DSS `SetVMod #81` для `B=1`, затем
+         для `B=0`; runtime рисует в **одну VRAM-страницу `#50`**, где CPU-адресация
+         совпадает с flappybird/sdcc-sprinter-sdk: буфер A = `#C000`, буфер B =
+         `#C140` (320 байт apart). `RGMOD` бит0 = отображаемый экран;
+         `begin_vram_write` выбирает обратную базу `#C000/#C140`.
+         Палитра
+         поэкранная, но обе palette banks лежат в `#50`: page 0 = `#C3E0..#C3E3`,
+         page 1 = `#C3E4..#C3E7` (см. BIOS `PIC_SET_PAL`). Постраничная попытка писать
+         пиксели или палитру в `#55` неверна. Трактовка BIOS X-offset 8/48 как
+         CPU-базы `#C040/#C180` дала сдвиг изображения примерно на 64 px; для палитры
+         `#55` давал чёрный экран после `swap_screen`. Тест — `example_imgtest`.
+         HW_NOTES §3.
+      **Дальше (M2b — спрайты, цель example_sprites):** движок спрайтов (`lib_sprites`:
+      `_sprqueue`, `set_sprite`, `sprites_start/stop`, рендер+восстановление фона в
+      `swap_screen`; gfx-страница спрайта `page_table[gfx_pages+(id>>6)]`, `off=(id&63)*256`).
+      **M3:** HRUST Z80-депакер (`kode/DEPACK`) — сжатие on.
 - ⬜ `Makefile` (SDK-уровня и проектного уровня): сборка `evo.c` + asm-библиотек + crt0 +
       ассетов в EXE. Команда сборки проекта — одна `make`-цель.
 - ⬜ `sprintersdk/evo.h`: тот же API, что `evosdk/evo.h` (идентичные сигнатуры/константы).
@@ -210,7 +261,7 @@ Sprinter** (чёрный экран, не падает, отрабатывает
       `clear_screen`/крупные блиты — через **accel** (блоки >12 байт).
       → Начат перенос: `clear_screen(color)` реализован в asm через Sprinter accel
       (`LD D,D` + два `LD C,C` fill по 160 байт на строку), пишет в теневой буфер
-      (`RGMOD^1`) через `WIN3=#50`, `PORT_Y=0..255`, затем возвращает `PORT_Y=#C0` и
+      (`RGMOD^1`) через `WIN3=#50`, base `#C000/#C140`, `PORT_Y=0..255`, затем возвращает `PORT_Y=#C0` и
       восстанавливает WIN3. Runtime init очищает оба буфера A/B в чёрный после установки
       видеорежима для обеих страниц.
       → Добавлен runtime-доступ к `EVOS` assets для low-loader EXE: `dss_exe.py` патчит

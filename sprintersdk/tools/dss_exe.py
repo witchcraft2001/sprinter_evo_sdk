@@ -21,12 +21,20 @@ PAGE = 0x4000                      # 16 KB window/page
 MONOBLOCK_CODE_CHUNKS = 4          # chunk0=#0000-#3FFF(hot/SRAM),1=WIN1,2=WIN2,3=WIN3
 MONOBLOCK_HOT_SIZE = 0x4000        # bytes of chunk0 LDIR'd into SRAM
 MONOBLOCK_ENTRY = 0x2400           # crt0 _entry (runs in SRAM after cache-on)
+# The loader runs in WIN2 -- the canonical DSS program window (DSS/BIOS use WIN0
+# system + WIN1 scratch, so SetVMod doesn't clobber it). See loader.asm.
+LOADER_LOAD = 0x8100
+LOADER_SP = 0xBFFF
 MINIHDR_SIZE = 16
 MINIHDR_MAGIC = ord("L")
 EVP_MAGIC = b"EVP1"
 EVP_HEADER_SIZE = 16
-# WIN2 reserved table region (loader.asm EVO_*): C code/data must stay below this.
-EVO_TABLE_REGION = 0xB000
+# SDK SRAM table region (loader.asm EVO_*): #1A00 page table / #1A40 vmode /
+# #1B00 EVP1 meta, up to the stack at #2000. SDK code+data must stay below it
+# and C must start at/after #2400 -- so #1A00..#23FF must be empty in the image.
+EVO_TABLE_REGION = 0x1A00
+EVO_TABLE_END = 0x2400              # exclusive (covers tables + the 1 KB stack)
+EVO_META_MAX = 0x400               # #1B00..#1EFF
 
 
 def parse_ihx(path: Path) -> dict[int, int]:
@@ -214,22 +222,23 @@ def build_monoblock(code: bytes, loader: bytes, assets: bytes, entry: int) -> by
     k = max(MONOBLOCK_CODE_CHUNKS, chunks_needed)
     image = code + bytes(k * PAGE - len(code))
 
-    # C code/data must not collide with the loader's WIN2 table region.
-    region = image[EVO_TABLE_REGION:EVO_TABLE_REGION + PAGE]
+    # SDK code+data must stay below the loader's table region, and C must start
+    # at #2400 -- so nothing should occupy #1A00..#23FF in the image.
+    region = image[EVO_TABLE_REGION:EVO_TABLE_END]
     if any(region):
         raise SystemExit(
-            f"dss_exe: image has data in the reserved WIN2 table region "
-            f"0x{EVO_TABLE_REGION:04X}-0x{EVO_TABLE_REGION + PAGE - 1:04X}; "
-            "lower the C code or relocate _DATA below it"
+            f"dss_exe: image has data in the reserved SDK region "
+            f"0x{EVO_TABLE_REGION:04X}-0x{EVO_TABLE_END - 1:04X} (tables + stack); "
+            "SDK code+data is too large for the #0000-#19FF SRAM window"
         )
 
     m = len(data_pages)
     if m > 64:
         raise SystemExit(f"dss_exe: {m} asset pages exceed the 64-entry page table")
-    # loader.asm: EVO_META=#B100, EVO_SAVED_SLOT0=#B400 -> meta must fit in 768 B.
-    if len(meta_blob) > 0x300:
+    if len(meta_blob) > EVO_META_MAX:
         raise SystemExit(
-            f"dss_exe: EVP1 meta {len(meta_blob)} B exceeds the 0x300 WIN2 table window"
+            f"dss_exe: EVP1 meta {len(meta_blob)} B exceeds the 0x{EVO_META_MAX:X} "
+            "SRAM meta window (#1B00-#1EFF)"
         )
 
     minihdr = bytearray(MINIHDR_SIZE)
@@ -240,7 +249,7 @@ def build_monoblock(code: bytes, loader: bytes, assets: bytes, entry: int) -> by
     struct.pack_into("<H", minihdr, 6, MONOBLOCK_HOT_SIZE)
     struct.pack_into("<H", minihdr, 8, entry)
 
-    header = make_header(DSS_MIN_LOAD, DSS_MIN_LOAD, 0x7FFD, loader_size=len(loader))
+    header = make_header(LOADER_LOAD, LOADER_LOAD, LOADER_SP, loader_size=len(loader))
     body = bytes(minihdr) + image + meta_blob + b"".join(data_pages)
     return header + loader + body, k, m, len(meta_blob)
 

@@ -33,7 +33,7 @@ void show_picture(u8 image,u8 dir,u8 fade)
 
 void main(void)
 {
-	static u8 i,joy,joyprev,image;
+	static u8 i,joy,joyprev,image,keys[40];
 
 	image=0;
 	joyprev=0;
@@ -43,10 +43,11 @@ void main(void)
 	while(1)
 	{
 		i=joystick();
+		keyboard(keys);
 		joy=i^joyprev&i;
 		joyprev=i;
 
-		if(joy&JOY_LEFT)
+		if((joy&JOY_LEFT)||(keys[KEY_O]&KEY_PRESS))
 		{
 			--image;
 			if(image>4) image=4;
@@ -54,7 +55,7 @@ void main(void)
 			show_picture(image,0,1);
 		}
 
-		if(joy&JOY_RIGHT)
+		if((joy&JOY_RIGHT)||(keys[KEY_P]&KEY_PRESS))
 		{
 			++image;
 			if(image>4) image=0;
@@ -62,7 +63,7 @@ void main(void)
 			show_picture(image,1,1);
 		}
 
-		if(joy&JOY_UP)
+		if((joy&JOY_UP)||(keys[KEY_Q]&KEY_PRESS))
 		{
 			--image;
 			if(image>4) image=4;
@@ -70,7 +71,7 @@ void main(void)
 			show_picture(image,0,0);
 		}
 
-		if(joy&JOY_DOWN)
+		if((joy&JOY_DOWN)||(keys[KEY_A]&KEY_PRESS))
 		{
 			++image;
 			if(image>4) image=0;

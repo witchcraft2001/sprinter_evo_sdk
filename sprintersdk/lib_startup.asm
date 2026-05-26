@@ -12,8 +12,6 @@
 
         .globl  _evo_runtime_init
         .globl  _evo_runtime_shutdown
-        .globl  _evos_assets_ptr
-        .globl  _evos_assets_len
 
         .globl  _memset
         .globl  _memcpy
@@ -34,19 +32,25 @@
         ; --- shared helpers exported to lib_tiles.asm ---
         .globl  begin_vram_write
         .globl  end_vram_write
-        .globl  find_asset_record
-        .globl  _asset_found_record
+        .globl  _vram_base              ; back buffer base (#C000/#C140), set by begin_vram_write
 
-        .area   _CODE
+        .area   _SDK
 
-; ---- runtime table region in the WIN2 data page (#B000-#BFFF), filled by
-;      loader.asm. DRAM, cache-independent, not remapped during draws. These
-;      EQUs MUST match loader.asm. ----
-EVO_SAVED_SLOT0 = 0xB400
-EVO_SAVED_VMODE = 0xB401
-EVO_EXIT_CODE   = 0xB402
-EVO_TRAMP_BUF   = 0xB800         ; DRAM buffer for the cache-off exit trampoline
-EVO_TRAMP_SP    = 0xBF00         ; DRAM stack for the cache-off DSS RST calls
+; ---- SDK runtime region in SRAM (#0000-#1FFF, mirror of EvoSDK #E000-#FFFF).
+;      Loader fills the tables into chunk0 before LDIR'ing it into SRAM. These
+;      EQUs MUST match loader.asm and lib_tiles.asm. ----
+EVO_PAGE_TABLE  = 0x1A00         ; asset phys page table (64 B), loader-filled
+EVO_SAVED_VMODE = 0x1A40         ; original DSS video mode (for exit), loader-filled
+EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
+
+; The exit trampoline must execute with CACHE off (WIN0 = DSS BIOS, so SRAM is
+; gone). We copy it -- and the values it needs -- transiently into WIN2 DRAM
+; (the program is exiting, so clobbering C data there is harmless). No DRAM is
+; reserved permanently.
+EXIT_VMODE_DRAM = 0x8000
+EXIT_CODE_DRAM  = 0x8001
+EXIT_TRAMP_DRAM = 0x8010
+EXIT_TRAMP_SP   = 0xBF00
 
 _evo_runtime_init::
         ; Runs in SRAM (CACHE on). Video mode (#81 on both pages) was set by the
@@ -59,12 +63,17 @@ _evo_runtime_init::
         ld      a, #3
         ld      (_pal_bright_level), a
 
+        call    evo_meta_init          ; cache EVP1 table bases (loader filled #1A00+)
+
         xor     a
         out     (#0xC9), a             ; visible screen A, blank bit clear
         ld      (_screen_active), a
         call    clear_both_buffers_black
         call    _pal_clear
-        ei
+        ; NB: stay DI. With CACHE on, WIN0=SRAM, so the IM1 vector (#0038) and
+        ; IM2 table are SRAM, not DSS -- an EI here would crash on the first
+        ; frame IRQ. Phase 1 has no interrupt handler (vsync is polled). IM2 +
+        ; EI come in Phase 2 (sound/time) once the handler lives in SRAM.
         ret
 
 ; void evo_runtime_shutdown(unsigned char exit_code)  [exit_code in L]
@@ -74,34 +83,33 @@ _evo_runtime_init::
 ;   loader, then DSS.Exit. Does not return. (cf. evosdk_libs evo_exit.s.)
 _evo_runtime_shutdown::
         di
+        ; Launcher runs in SRAM (CACHE on): stash exit code + the saved video
+        ; mode (read from SRAM) into WIN2 DRAM, copy the trampoline to WIN2, run.
         ld      a, l
-        ld      (EVO_EXIT_CODE), a
+        ld      (EXIT_CODE_DRAM), a
+        ld      a, (EVO_SAVED_VMODE)
+        ld      (EXIT_VMODE_DRAM), a
         ld      hl, #tramp_src
-        ld      de, #EVO_TRAMP_BUF
+        ld      de, #EXIT_TRAMP_DRAM
         ld      bc, #tramp_end - tramp_src
         ldir
-        jp      EVO_TRAMP_BUF
+        jp      EXIT_TRAMP_DRAM
 
-; Position-independent, straight-line trampoline body. Copied to #B800 (WIN2
-; DRAM) and run there so it survives CACHE off (which turns WIN0/SRAM into BIOS).
-; Uses only absolute addresses (ports + saved-state in WIN2), no internal jumps.
+; Position-independent, straight-line trampoline body. Copied into WIN2 DRAM and
+; run there so it survives CACHE off (which turns WIN0/SRAM into DSS BIOS). Only
+; absolute addresses (ports + the transient values in WIN2), no internal jumps.
 tramp_src:
-        ld      sp, #EVO_TRAMP_SP       ; DRAM stack (WIN0 is gone after cache off)
+        ld      sp, #EXIT_TRAMP_SP      ; DRAM stack (WIN0/SRAM gone after cache off)
         in      a, (#0x7B)              ; CACHE off -> WIN0 = DSS BIOS
-        ld      bc, #0x0089             ; silence CBL DAC
-        xor     a
-        out     (c), a
         push    ix                      ; SetVMod clobbers IX
-        ld      a, (EVO_SAVED_VMODE)
+        ld      a, (EXIT_VMODE_DRAM)
         ld      b, #0
         ld      c, #0x50                ; DSS SetVMod (restore video mode)
         rst     #0x10
         pop     ix
-        ld      a, (EVO_SAVED_SLOT0)
-        out     (#0x82), a              ; restore WIN0 page register
         ld      a, #0xC0
         out     (#0x89), a              ; park PORT_Y
-        ld      a, (EVO_EXIT_CODE)
+        ld      a, (EXIT_CODE_DRAM)
         ld      b, a
         ld      c, #0x41                ; DSS.Exit (does not return)
         rst     #0x10
@@ -178,45 +186,19 @@ _border::
         ret
 
 _vsync::
-        ; CBL control #004E enables #FE.5 video sync in evosdk_libs/video_vsync.s.
-        ld      bc, #0x004E
-        ld      a, #0x80
-        out     (c), a
-
-        ld      de, #0x8000
+        ; Phase 1 graphics tests must not initialize CBL here. Proper VSync will
+        ; move to the IM2/frame handler; for now keep a bounded delay and tick.
+        ld      de, #0x4000
 1$:
-        ld      a, #0xFF
-        in      a, (#0xFE)
-        bit     5, a
-        jr      nz, 2$
         dec     de
         ld      a, d
         or      e
         jr      nz, 1$
-        jr      4$
-
-2$:
-        ld      de, #0x8000
-3$:
-        ld      a, #0xFF
-        in      a, (#0xFE)
-        bit     5, a
-        jr      z, vsync_tick
-        dec     de
-        ld      a, d
-        or      e
-        jr      nz, 3$
-
-4$:
-        ei
-        halt
-
-vsync_tick:
         jp      inc_time_counter
 
 _swap_screen::
         call    _vsync
-        in      a, (#0xC9)              ; RGMOD bit 0: visible page A/B
+        in      a, (#0xC9)              ; flappybird model: read current RGMOD.0
         xor     #0x01
         and     #0x01
         out     (#0xC9), a
@@ -268,12 +250,26 @@ inc_time_counter:
         inc     (hl)
         ret
 
+; Double buffer -- model used by flappybird grx_utils.asm and
+; sdcc-sprinter-sdk/lib/gfx/gfx_lowlevel.s. DSS SetVMod #81 must be called
+; for screen pages B=1 and B=0 by the loader. Runtime drawing maps a SINGLE
+; VRAM page #50 into WIN3. For the selected PORT_Y(#89) scanline, CPU writes
+; buffer 0 at #C000+x and buffer 1 at #C140+x (320 bytes apart). RGMOD(#C9).0
+; selects the displayed buffer; back buffer = !visible.
+VRAM_PAGE       = 0x50
+VRAM_BUF0_BASE  = 0xC000
+VRAM_BUF1_BASE  = 0xC140
+VRAM_Y_OFFSET   = 28                    ; center 200-row Evo surface in 256 rows
+
 clear_both_buffers_black:
-        call    begin_vram_write
-        ld      c, #0
-        ld      hl, #0xC000
+        in      a, (#0xE2)
+        ld      (_vram_saved_win3), a
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a
+        ld      c, #0                   ; black
+        ld      hl, #VRAM_BUF0_BASE
         call    fill_buffer_320x256
-        ld      hl, #0xC140
+        ld      hl, #VRAM_BUF1_BASE
         call    fill_buffer_320x256
         jp      end_vram_write
 
@@ -281,22 +277,24 @@ _clear_screen::
         ld      hl, #2
         add     hl, sp
         ld      c, (hl)
-        call    begin_vram_write
-        in      a, (#0xC9)              ; draw to hidden buffer = !visible
-        and     #1
-        xor     #1
-        ld      hl, #0xC000
-        jr      z, 1$
-        ld      hl, #0xC140
-1$:
-        call    fill_buffer_320x256
+        call    begin_vram_write        ; WIN3 = #50, HL = hidden buffer base
+        call    fill_buffer_320x256     ; HL = base, C = color
         jp      end_vram_write
 
+; begin_vram_write: WIN3 = page #50; select the HIDDEN (back) buffer base.
+; Returns #C000 when visible is buffer 1, #C140 when visible is buffer 0.
 begin_vram_write::
         in      a, (#0xE2)
         ld      (_vram_saved_win3), a
-        ld      a, #0x50                ; normal VRAM write, DRAM mirror updated
+        ld      a, #VRAM_PAGE
         out     (#0xE2), a
+        in      a, (#0xC9)
+        and     #1                      ; visible buffer (0/1)
+        ld      hl, #VRAM_BUF1_BASE     ; visible 0 -> draw hidden buffer 1
+        jr      z, 1$
+        ld      hl, #VRAM_BUF0_BASE     ; visible 1 -> draw hidden buffer 0
+1$:
+        ld      (_vram_base), hl
         ret
 
 end_vram_write::
@@ -307,9 +305,9 @@ end_vram_write::
         ret
 
 fill_buffer_320x256:
-        ; In: HL = row base (#C000 visible A or #C140 visible B), C = color.
-        ; Sprinter row window is selected by PORT_Y; 320 pixels are two
-        ; 160-byte accel fills because the block-size latch is 8-bit.
+        ; In: HL = row base (#C000/#C140, page #50 in WIN3), C = color.
+        ; Fills all 256 scanlines. Sprinter row window is selected by PORT_Y;
+        ; 320 pixels are two 160-byte accel fills (block-size latch is 8-bit).
         xor     a
 1$:
         out     (#0x89), a
@@ -331,8 +329,7 @@ fill_row_320:
         ld      c, c                    ; accel: horizontal fill mode
         ld      a, c
         ld      (hl), a                 ; accel fire: first 160 bytes
-        ld      b, b                    ; accel off
-        ei
+        ld      b, b                    ; accel off (stay DI: Phase 1 has no IRQ handler)
 
         ld      a, #160
         add     a, l
@@ -347,14 +344,15 @@ fill_row_320:
         ld      a, c
         ld      (hl), a                 ; accel fire: second 160 bytes
         ld      b, b
-        ei
 
         pop     hl
         ret
 
 ; -------------------------------------------------------------------------
 ;  Palette (EvoSDK lib_startup zone). Direct protocol from HW_NOTES.md §3:
-;  WIN3=#50, PORT_Y=index, #C3E0/#C3E1/#C3E2 = R/G/B (6-bit value in bits 7..2).
+;  WIN3=#50, PORT_Y=index. BIOS PIC_SET_PAL uses palette page A as an offset
+;  inside the same VRAM page: page 0 at #C3E0..#C3E3, page 1 at #C3E4..#C3E7.
+;  Direct writes therefore update both offsets, not VRAM page #55.
 ; -------------------------------------------------------------------------
 _pal_clear::
         ld      hl, #_palette
@@ -366,11 +364,18 @@ _pal_clear::
         djnz    1$
 
         in      a, (#0xE2)
-        ld      d, a
-        ld      a, #0x50
+        ld      (_pal_saved_win3), a
+        ld      a, #VRAM_PAGE
         out     (#0xE2), a
+        call    clear_pal_banks
+        ld      a, #0xC0
+        out     (#0x89), a
+        ld      a, (_pal_saved_win3)
+        out     (#0xE2), a
+        ret
+
+clear_pal_banks:                        ; WIN3 = #50; zero both palette banks
         ld      b, #0
-        xor     a
 2$:
         ld      a, b
         out     (#0x89), a
@@ -378,11 +383,12 @@ _pal_clear::
         ld      (#0xC3E0), a
         ld      (#0xC3E1), a
         ld      (#0xC3E2), a
+        ld      (#0xC3E3), a
+        ld      (#0xC3E4), a
+        ld      (#0xC3E5), a
+        ld      (#0xC3E6), a
+        ld      (#0xC3E7), a
         djnz    2$
-        ld      a, #0xC0
-        out     (#0x89), a
-        ld      a, d
-        out     (#0xE2), a
         ret
 
 _pal_bright::
@@ -403,16 +409,12 @@ _pal_col::
         and     #15
         ld      c, a
         inc     hl
-        ld      e, (hl)                 ; RGB222 color
+        ld      a, (hl)                 ; RGB222 color
         ld      b, #0
         ld      hl, #_palette
         add     hl, bc
-        ld      (hl), e
-
-        call    begin_palette_write
-        ld      a, e
-        call    write_palette_entry
-        jp      end_palette_write
+        ld      (hl), a                 ; store color into _palette[id]
+        jp      apply_palette_all       ; re-apply whole palette
 
 _pal_custom::
         ld      hl, #2
@@ -429,37 +431,28 @@ _pal_custom::
 _pal_copy::
         ld      hl, #2
         add     hl, sp
-        ld      c, (hl)                 ; palette id
-        xor     a                       ; EVOS type 0 = PAL
-        call    find_asset_record
-        jr      c, 2$
-        ld      hl, #3
-        add     hl, sp
+        ld      a, (hl)                 ; palette id
+        inc     hl
         ld      e, (hl)
         inc     hl
-        ld      d, (hl)
+        ld      d, (hl)                 ; DE = user RGB222[16] dest
+        push    de
+        call    map_palette_page        ; HL = payload in WIN1, WIN1 saved
+        pop     de
         call    copy_palette_payload
-        ret
-2$:
-        ld      hl, #3                  ; fallback: copy current palette
-        add     hl, sp
-        ld      e, (hl)
-        inc     hl
-        ld      d, (hl)
-        ld      hl, #_palette
-        ld      bc, #16
-        ldir
+        ld      a, (_pal_saved_win1)
+        out     (#0xA2), a              ; restore WIN1
         ret
 
 _pal_select::
         ld      hl, #2
         add     hl, sp
-        ld      c, (hl)                 ; palette id
-        xor     a                       ; EVOS type 0 = PAL
-        call    find_asset_record
-        ret     c
+        ld      a, (hl)                 ; palette id
+        call    map_palette_page        ; HL = payload in WIN1, WIN1 saved
         ld      de, #_palette
         call    copy_palette_payload
+        ld      a, (_pal_saved_win1)
+        out     (#0xA2), a              ; restore WIN1
         jp      apply_palette_all
 
 copy_palette_payload:
@@ -501,11 +494,23 @@ copy_palette_payload:
         djnz    1$
         ret
 
+; apply_palette_all: write _palette[16] to both screen palette banks.
 apply_palette_all:
-        call    begin_palette_write
+        in      a, (#0xE2)
+        ld      (_pal_saved_win3), a
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a
+        call    apply_pal_banks
+        ld      a, #0xC0
+        out     (#0x89), a
+        ld      a, (_pal_saved_win3)
+        out     (#0xE2), a
+        ret
+
+apply_pal_banks:                        ; WIN3 = #50
         ld      hl, #_palette
         ld      c, #0
-1$:
+3$:
         ld      a, (hl)
         push    hl
         call    write_palette_entry
@@ -514,21 +519,7 @@ apply_palette_all:
         inc     c
         ld      a, c
         cp      #16
-        jr      nz, 1$
-        jp      end_palette_write
-
-begin_palette_write:
-        in      a, (#0xE2)
-        ld      (_pal_saved_win3), a
-        ld      a, #0x50
-        out     (#0xE2), a
-        ret
-
-end_palette_write:
-        ld      a, #0xC0
-        out     (#0x89), a
-        ld      a, (_pal_saved_win3)
-        out     (#0xE2), a
+        jr      nz, 3$
         ret
 
 write_palette_entry:
@@ -559,6 +550,7 @@ write_palette_entry:
         add     hl, bc
         ld      a, (hl)
         ld      (#0xC3E0), a
+        ld      (#0xC3E4), a
         pop     hl
 
         ld      a, e                    ; green = bits 2..3
@@ -571,6 +563,7 @@ write_palette_entry:
         add     hl, bc
         ld      a, (hl)
         ld      (#0xC3E1), a
+        ld      (#0xC3E5), a
         pop     hl
 
         ld      a, e                    ; blue = bits 0..1
@@ -580,66 +573,73 @@ write_palette_entry:
         add     hl, bc
         ld      a, (hl)
         ld      (#0xC3E2), a
+        ld      (#0xC3E6), a
+        xor     a
+        ld      (#0xC3E3), a
+        ld      (#0xC3E7), a
         pop     bc
         ret
 
 ; -------------------------------------------------------------------------
-;  Asset bundle access (shared). find_asset_record returns a flat pointer
-;  into the EVOS bundle at _evos_assets_ptr. NB: flat model -- works for the
-;  Stage 2 low-loader (bundle <64KB in WIN1). The PRELOAD/paged loader will
-;  rework payload addressing to page-map + window-offset (see HW_NOTES §14).
+;  EVP1 paged asset access (HW_NOTES §9.2, §15). The loader copied the EVP1
+;  header+metadata to EVO_META (#1B00, SRAM). Tables are ID-indexed; access is
+;  O(1): table_base + id*stride, then map one page into WIN1.
+;
+;  EVO_META layout: [16B EVP1 header][u8 img_count][img*4]
+;                   [u8 pal_count][pal*3:{u8 page,u16 off}][...]
+;  Fixed: img_count @ EVO_META+16, img table @ +17. pal table base depends on
+;  img_count -> computed once by evo_meta_init.
 ; -------------------------------------------------------------------------
-find_asset_record::
-        ; In: A = type, C = id. Out: NC+HL=payload, C if missing.
-        ld      (_asset_find_type), a
-        ld      a, c
-        ld      (_asset_find_id), a
+EVO_PAGE_TABLE  = 0x1A00                ; asset phys page table (loader-filled)
+EVO_META_IMGCNT = 0x1B10                ; EVO_META + 16
+EVO_IMG_TABLE   = 0x1B11                ; EVO_META + 17
 
-        ld      hl, (_evos_assets_ptr)
-        ld      a, h
-        or      l
-        jr      z, asset_missing
-
-        ld      de, #6
-        add     hl, de
-        ld      b, (hl)                 ; record_count low byte; enough for current EVOS
-        ld      a, b
-        or      a
-        jr      z, asset_missing
-
-        ld      hl, (_evos_assets_ptr)
-        ld      de, #16                 ; first record
-        add     hl, de
-asset_find_loop:
-        ld      a, (hl)
-        ld      c, a
-        ld      a, (_asset_find_type)
-        cp      c
-        jr      nz, asset_find_next
-        inc     hl
-        ld      c, (hl)
-        dec     hl
-        ld      a, (_asset_find_id)
-        cp      c
-        jr      z, asset_find_hit
-asset_find_next:
-        ld      de, #16
-        add     hl, de
-        djnz    asset_find_loop
-asset_missing:
-        scf
+evo_meta_init:
+        ; _pal_base = EVO_IMG_TABLE + img_count*4 + 1 (skip pal_count byte)
+        ld      a, (EVO_META_IMGCNT)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl
+        add     hl, hl                  ; img_count*4
+        ld      de, #EVO_IMG_TABLE
+        add     hl, de                  ; -> pal_count byte
+        inc     hl                      ; -> pal table
+        ld      (_pal_base), hl
         ret
 
-asset_find_hit:
-        ld      (_asset_found_record), hl
-        ld      de, #8                  ; record.offset low word
-        add     hl, de
+map_palette_page:
+        ; In: A = palette id. Out: HL = payload in WIN1 (#4000+off); WIN1
+        ; saved in _pal_saved_win1 (caller restores). record = _pal_base+id*3,
+        ; record = { u8 logical_page, u16 offset }. The logical page must be
+        ; resolved through page_table to a physical page (same as draw_tile).
+        ld      l, a
+        ld      h, #0
+        ld      d, h
+        ld      e, l
+        add     hl, hl                  ; id*2
+        add     hl, de                  ; id*3
+        ld      de, (_pal_base)
+        add     hl, de                  ; -> record {u8 page, u16 off}
+        ld      a, (hl)                 ; logical page
+        inc     hl
         ld      e, (hl)
         inc     hl
-        ld      d, (hl)
-        ld      hl, (_evos_assets_ptr)
+        ld      d, (hl)                 ; DE = offset
+        ; phys = page_table[logical]
+        push    de                      ; save offset
+        ld      e, a
+        ld      d, #0
+        ld      hl, #EVO_PAGE_TABLE
         add     hl, de
-        or      a
+        ld      a, (hl)                 ; physical page
+        pop     de                      ; restore offset
+        ld      c, a
+        in      a, (#0xA2)
+        ld      (_pal_saved_win1), a    ; save WIN1
+        ld      a, c
+        out     (#0xA2), a              ; map physical palette page into WIN1
+        ld      hl, #0x4000
+        add     hl, de                  ; HL = payload
         ret
 
 pal_bright_table:
@@ -652,10 +652,10 @@ pal_bright_table:
         .db     168, 196, 224, 252
         .db     252, 252, 252, 252
 
-        .area   _DATA
-        ; DSS window/video state is saved by loader.asm to WIN2 #B400-#B401
-        ; (cache-independent) and restored by the exit trampoline -- no _DATA
-        ; copies here anymore.
+        .area   _SDKDATA
+        ; SDK mutable data, in the SRAM region (#1600). Saved video mode for the
+        ; exit trampoline lives in SRAM #1A40 (loader-filled), read by the
+        ; shutdown launcher before CACHE off.
 _screen_active:
         .db     0
 _time_counter:
@@ -672,13 +672,9 @@ _pal_saved_win3:
         .db     0
 _vram_saved_win3:
         .db     0
-_evos_assets_ptr:
-        .dw     0
-_evos_assets_len:
-        .dw     0
-_asset_find_type:
+_pal_saved_win1:
         .db     0
-_asset_find_id:
-        .db     0
-_asset_found_record:
+_pal_base:
+        .dw     0
+_vram_base:
         .dw     0

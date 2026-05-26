@@ -27,9 +27,10 @@
         .area   _CODE
 _entry::
         ; Entry from the PRELOAD loader (loader.asm): CACHE on (WIN0=SRAM = this
-        ; code), A = the physical page the loader staged for WIN1. Map it, set
-        ; the Scheme C stack, then run C. See HW_NOTES §9.2.
-        out     (#0xA2), a            ; WIN1 = code chunk1 page
+        ; code), A = the physical page for WIN2 (the loader runs in WIN2 and
+        ; cannot map its own window, so it leaves WIN2 to us; it already mapped
+        ; WIN1=chunk1 and WIN3=chunk3). Map WIN2, set the stack, run C.
+        out     (#0xC2), a            ; WIN2 = code chunk2 page
         ld      sp, #0x23FF
         call    gsinit
         call    _evo_runtime_init

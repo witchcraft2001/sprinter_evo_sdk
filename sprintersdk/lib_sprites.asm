@@ -12,7 +12,7 @@
         .globl  _sprites_start
         .globl  _sprites_stop
 
-        .area   _CODE
+        .area   _SDK
 
 _set_sprite::
 _sprites_start::

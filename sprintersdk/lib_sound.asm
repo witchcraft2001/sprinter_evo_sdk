@@ -14,7 +14,7 @@
         .globl  _music_stop
         .globl  _sample_play
 
-        .area   _CODE
+        .area   _SDK
 
 _sfx_play::
 _sfx_stop::

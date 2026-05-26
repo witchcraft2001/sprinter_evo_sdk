@@ -32,10 +32,16 @@ EXE      ?= $(BUILD)/$(OUT).exe
 IHX2BIN  ?= $(SDK_DIR)tools/ihx2bin.py
 LOADER_SRC ?= $(SDK_DIR)loader.asm
 LOADER_BIN ?= $(BUILD)/loader.bin
-LOADER_ORG ?= 0x4100
+LOADER_ORG ?= 0x8100           # WIN2: canonical DSS program window (see loader.asm)
 
-# Scheme C
-CODE_LOC ?= 0x2400
+# Scheme C (mirror of EvoSDK): SDK code+data live in the SRAM region #0000-#1FFF
+# (like EvoSDK #E000-#FFFF), the stack at #2000-#23FF, and C code+data is one
+# contiguous block #2400-#FFFF (= the EvoSDK 56320 B budget).
+# SDK code at #0100 (not #0000: sdld ignores -b base 0; #0000-#00FF is left for
+# the RST/IM2 vectors, used in Phase 2). Still well inside the SRAM region.
+SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
+SDKDATA_LOC ?= 0x1600           # SDK mutable data (_SDKDATA), in SRAM
+CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
 CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 
@@ -91,6 +97,8 @@ $(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN)
 $(BUILD)/$(OUT).ihx: $(OBJS)
 	@printf '%s\n' '-mjx'                  > $(BUILD)/$(OUT).lk
 	@printf '%s\n' '-i $@'                >> $(BUILD)/$(OUT).lk
+	@printf '%s\n' '-b _SDK = $(SDK_LOC)' >> $(BUILD)/$(OUT).lk
+	@printf '%s\n' '-b _SDKDATA = $(SDKDATA_LOC)' >> $(BUILD)/$(OUT).lk
 	@printf '%s\n' '-b _CODE = $(CODE_LOC)' >> $(BUILD)/$(OUT).lk
 	@for rel in $(OBJS); do printf '%s\n' "$$rel" >> $(BUILD)/$(OUT).lk; done
 	@printf '%s\n' '-e'                   >> $(BUILD)/$(OUT).lk
