@@ -34,6 +34,9 @@
         .globl  end_vram_write
         .globl  _vram_base              ; back buffer base (#C000/#C140), set by begin_vram_write
         .globl  _sprites_render_before_swap
+        .globl  _sprites_restore_after_swap
+        .globl  _sync_tiles_to_shadow   ; from lib_tiles (dual-buffer tile sync)
+        .globl  _tiles_clear_dirty      ; from lib_tiles
 
         .area   _SDK
 
@@ -228,7 +231,9 @@ _swap_screen::
         and     #0x01
         out     (#0xC9), a
         ld      (_screen_active), a
-        ret
+        call    _sprites_restore_after_swap
+        call    _sync_tiles_to_shadow   ; propagate partial tile updates to the
+        ret                             ; new hidden buffer (keeps buffers in sync)
 
 _time::
         ld      hl, #_time_counter + 3
@@ -301,10 +306,16 @@ clear_both_buffers_black:
 _clear_screen::
         ld      hl, #2
         add     hl, sp
-        ld      c, (hl)
-        call    begin_vram_write        ; WIN3 = #50, HL = hidden buffer base
-        call    fill_buffer_320x256     ; HL = base, C = color
-        jp      end_vram_write
+        ld      c, (hl)                 ; C = color (preserved across fills)
+        call    begin_vram_write        ; WIN3 = #50
+        ; Clear BOTH buffers so the background base stays in sync across flips
+        ; (partial draw_tile updates are then synced per-cell by swap_screen).
+        ld      hl, #VRAM_BUF0_BASE
+        call    fill_buffer_320x256
+        ld      hl, #VRAM_BUF1_BASE
+        call    fill_buffer_320x256
+        call    end_vram_write
+        jp      _tiles_clear_dirty      ; background uniform -> drop dirty marks
 
 ; begin_vram_write: WIN3 = page #50; select the HIDDEN (back) buffer base.
 ; Returns #C000 when visible is buffer 1, #C140 when visible is buffer 0.

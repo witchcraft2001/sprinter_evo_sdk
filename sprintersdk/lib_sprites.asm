@@ -27,6 +27,8 @@
         .globl  _sprites_start
         .globl  _sprites_stop
         .globl  _sprites_render_before_swap
+        .globl  _sprites_restore_after_swap
+        .globl  _sprites_active         ; read by lib_tiles to gate tile-sync
 
         .area   _SDK
 
@@ -170,44 +172,12 @@ render_base_ok:
         in      a, (#0xE2)
         ld      (_spr_win3), a
 
-; ---- RESTORE: copy clean background from the mirror over last frame's -----
-; ---- sprites in this back buffer (page #50 same-address accel copy).  -----
-        call    select_saved_arrays     ; -> _spr_vptr / _spr_xptr / _spr_yptr
-        ld      a, #VRAM_PAGE
-        out     (#0xE2), a
-        ld      a, #64
-        ld      (_spr_cnt), a
-restore_loop:
-        ld      hl, (_spr_vptr)
-        ld      a, (hl)
-        or      a
-        jr      z, restore_next
-        ld      (hl), #0                ; consume this saved rect
-
-        ld      hl, (_spr_yptr)
-        ld      a, (hl)
-        ld      (_spr_py), a
-
-        ld      hl, (_spr_xptr)
-        ld      a, (hl)
-        ld      l, a
-        ld      h, #0
-        add     hl, hl                  ; x*2 (16-bit)
-        ld      bc, (_spr_base)
-        add     hl, bc                  ; HL = VRAM column
-        ld      a, (_spr_py)
-        call    restore_one_16x16
-restore_next:
-        call    advance_saved_ptrs
-        ld      hl, #_spr_cnt
-        dec     (hl)
-        jr      nz, restore_loop
-
-        ld      a, #0xC0
-        out     (#0x89), a
-
 ; ---- DRAW: blit the current queue through #5C (transparent, VRAM-only). ----
-        call    select_saved_arrays     ; reset saved pointers for the draw pass
+; The back buffer is already clean here: _sprites_restore_after_swap erased its
+; previous-frame sprites (from the mirror) right after the last flip, so a
+; restore pass before drawing would be a no-op. Single restore point = less work
+; per frame and no double-restore interaction.
+        call    select_saved_arrays     ; -> _spr_vptr / _spr_xptr / _spr_yptr
         ld      hl, #_sprqueue
         ld      (_spr_qptr), hl
         ld      a, #VRAM_PAGE_SPR
@@ -306,6 +276,45 @@ draw_done:
         ret
 
 ; -------------------------------------------------------------------------
+; sprites_restore_after_swap()
+; EvoSDK restores the old visible screen immediately after flipping it to the
+; shadow buffer (evosdk/lib_startup.asm: _swap_screen -> respr). Do the same
+; here: after RGMOD.0 was toggled, the hidden buffer is visible^1 and may still
+; contain sprites from the previous frame. Restore only saved rectangles from
+; the clean hardware mirror so a later non-sprite swap cannot show stale masks.
+; -------------------------------------------------------------------------
+_sprites_restore_after_swap::
+        ld      a, (_sprites_active)
+        or      a
+        ret     z
+        di
+
+        in      a, (#0xE2)
+        ld      (_spr_win3), a
+
+        in      a, (#0xC9)
+        and     #1
+        xor     #1
+        ld      (_spr_back), a
+        ld      hl, #VRAM_BUF0_BASE
+        or      a
+        jr      z, restore_after_base_ok
+        ld      hl, #VRAM_BUF1_BASE
+restore_after_base_ok:
+        ld      (_spr_base), hl
+
+        call    select_saved_arrays
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a
+        call    restore_saved_rects
+
+        ld      a, #0xC0
+        out     (#0x89), a
+        ld      a, (_spr_win3)
+        out     (#0xE2), a
+        ret
+
+; -------------------------------------------------------------------------
 ; select_saved_arrays: point _spr_vptr/_spr_xptr/_spr_yptr at the saved-rect
 ; slice for the current back buffer (offset +64 for buffer 1).
 ; -------------------------------------------------------------------------
@@ -335,6 +344,36 @@ advance_saved_ptrs:
         ld      hl, (_spr_yptr)
         inc     hl
         ld      (_spr_yptr), hl
+        ret
+
+restore_saved_rects:
+        ld      a, #64
+        ld      (_spr_cnt), a
+restore_loop:
+        ld      hl, (_spr_vptr)
+        ld      a, (hl)
+        or      a
+        jr      z, restore_next
+        ld      (hl), #0                ; consume this saved rect
+
+        ld      hl, (_spr_yptr)
+        ld      a, (hl)
+        ld      (_spr_py), a
+
+        ld      hl, (_spr_xptr)
+        ld      a, (hl)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl                  ; x*2 (16-bit)
+        ld      bc, (_spr_base)
+        add     hl, bc                  ; HL = VRAM column
+        ld      a, (_spr_py)
+        call    restore_one_16x16
+restore_next:
+        call    advance_saved_ptrs
+        ld      hl, #_spr_cnt
+        dec     (hl)
+        jr      nz, restore_loop
         ret
 
 ; -------------------------------------------------------------------------

@@ -21,17 +21,27 @@
         .globl  _draw_tile
         .globl  _draw_tile_key
         .globl  _draw_image
+        .globl  _sync_tiles_to_shadow   ; called by swap_screen (lib_startup)
+        .globl  _tiles_clear_dirty      ; called by clear_screen (lib_startup)
 
         ; --- imported from lib_startup.asm ---
         .globl  begin_vram_write
         .globl  end_vram_write
         .globl  _vram_base              ; back buffer base (#C000/#C140)
+        ; --- imported from lib_sprites.asm ---
+        .globl  _sprites_active         ; tile-sync runs only while sprites active
 
 ; --- loader-filled runtime tables in the SDK SRAM region. MUST match loader.asm
 ;     and lib_startup.asm. ---
 EVO_PAGE_TABLE = 0x1A00                 ; phys page numbers, index = logical page
 EVO_IMG_TABLE  = 0x1B11                 ; EVO_META(#1B00)+16 hdr +1 img_count byte
                                         ; records: { u16 base_tile, u8 wt, u8 ht }
+VRAM_PAGE      = 0x50                    ; VRAM + DRAM mirror (read = mirror)
+VRAM_BUF0_BASE = 0xC000
+VRAM_BUF1_BASE = 0xC140
+VRAM_Y_OFFSET  = 28
+TILE_DIRTY_ROWS  = 25                   ; 200px / 8
+TILE_DIRTY_STRIDE = 5                   ; 40 cells / 8 bits
 
         .area   _SDK
 
@@ -62,12 +72,28 @@ select_image_a:
         ret
 
 _color_key::
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)
+        ld      (_color_key_value), a
         ret
 
 _draw_tile_key::
-        ; TODO(hw-keyed-tile): route keyed images through VRAM #58 once
-        ; assetpack marks color_key.N records. Until then, unkeyed path.
-        jp      _draw_tile
+        ld      a, (_image_selected)
+        or      a
+        ret     z
+
+        ld      hl, #2
+        add     hl, sp
+        ld      c, (hl)                 ; x in 8px tiles
+        inc     hl
+        ld      b, (hl)                 ; y in 8px tiles
+        inc     hl
+        ld      e, (hl)                 ; tile low
+        inc     hl
+        ld      d, (hl)                 ; tile high
+        call    draw_tile_setup
+        jp      draw_tile_keyed_rows
 
 _draw_tile::
         ld      a, (_image_selected)
@@ -86,6 +112,15 @@ _draw_tile::
 
 draw_tile_core:
         ; In: C = x tile, B = y tile, DE = tile index. Image is selected.
+        call    draw_tile_setup
+        jp      draw_tile_unkeyed_rows
+
+draw_tile_setup:
+        ; In: C = x tile, B = y tile, DE = tile index. Image is selected.
+        ; Out: WIN1 = source gfx page, WIN3 = VRAM #50, _draw_src/_draw_y and
+        ;      dest patches prepared. Caller must draw rows, call end_vram_write
+        ;      and restore WIN1 from _draw_saved_win1.
+        call    mark_tile_dirty         ; record cell (C,B) for buffer sync on swap
         ld      l, c
         ld      h, #0
         add     hl, hl
@@ -139,10 +174,14 @@ draw_dest_x_patch:
         ld      hl, (_vram_base)
         add     hl, bc
         ld      (draw_dest_patch + 1), hl
+        ld      (draw_tile_keyed_dest_patch + 1), hl
 
         ld      hl, (_draw_src)         ; persists, advances 8 bytes/row
         ld      a, #8
         ld      (_draw_rows), a
+        ret
+
+draw_tile_unkeyed_rows:
 draw_tile_row:
         ld      a, (_draw_y)
         out     (#0x89), a
@@ -168,6 +207,84 @@ draw_dest_patch:
 
         call    end_vram_write
         ld      a, (_draw_saved_win1)   ; restore WIN1 (C code lives there)
+        out     (#0xA2), a
+        ret
+
+draw_tile_keyed_rows:
+        ld      a, (_color_key_value)
+        ld      b, a
+draw_tile_keyed_row:
+        ld      a, (_draw_y)
+        out     (#0x89), a
+        inc     a
+        ld      (_draw_y), a
+
+draw_tile_keyed_dest_patch:
+        ld      de, #0
+
+        ld      a, (hl)
+        cp      b
+        jr      z, 1$
+        ld      (de), a
+1$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 2$
+        ld      (de), a
+2$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 3$
+        ld      (de), a
+3$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 4$
+        ld      (de), a
+4$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 5$
+        ld      (de), a
+5$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 6$
+        ld      (de), a
+6$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 7$
+        ld      (de), a
+7$:
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        cp      b
+        jr      z, 8$
+        ld      (de), a
+8$:
+        inc     hl
+
+        ld      a, (_draw_rows)
+        dec     a
+        ld      (_draw_rows), a
+        jr      nz, draw_tile_keyed_row
+
+        call    end_vram_write
+        ld      a, (_draw_saved_win1)
         out     (#0xA2), a
         ret
 
@@ -226,7 +343,221 @@ draw_image_col:
         jr      nz, draw_image_row
         ret
 
+; =========================================================================
+;  Dual-buffer background sync (EvoSDK tileUpdateMap equivalent).
+;  EvoSDK games draw PARTIAL tile updates and expect them to persist across
+;  the double-buffer flip. draw_tile draws to the back buffer only, so without
+;  syncing the two buffers diverge (score/field/title flicker). We track every
+;  changed 8x8 cell in a bitmap; after the flip, swap_screen calls
+;  _sync_tiles_to_shadow, which copies each dirty cell from the just-shown
+;  buffer's clean background (DRAM mirror, read via page #50) into the new
+;  hidden buffer. Sprites are page-#5C (VRAM-only) so they never enter the
+;  mirror -- the copy is clean background.
+; =========================================================================
+
+; mark_tile_dirty: set the dirty bit for cell (C = x tile, B = y tile).
+;   Preserves AF/BC/DE/HL (called from inside draw_tile_setup).
+mark_tile_dirty:
+        push    hl
+        push    de
+        push    bc
+        push    af
+        ; offset = y * TILE_DIRTY_STRIDE + (x >> 3)   (max 24*5+4 = 124)
+        ld      a, b                    ; y
+        add     a, a
+        add     a, a
+        add     a, b                    ; y*5
+        ld      e, a
+        ld      a, c                    ; x
+        srl     a
+        srl     a
+        srl     a                       ; x>>3
+        add     a, e
+        ld      e, a
+        ld      d, #0
+        ld      hl, #_tile_dirty
+        add     hl, de
+        ; mask = 1 << (x & 7)
+        ld      a, c
+        and     #7
+        ld      b, a
+        inc     b
+        xor     a
+        scf
+1$:
+        rla
+        djnz    1$                      ; A = 1 << (x&7)
+        or      (hl)
+        ld      (hl), a
+        ld      a, #1
+        ld      (_tile_dirty_any), a
+        pop     af
+        pop     bc
+        pop     de
+        pop     hl
+        ret
+
+; _tiles_clear_dirty: drop all dirty marks (after a full clear_screen of both
+;   buffers, the background is uniform -- no per-cell sync needed).
+_tiles_clear_dirty::
+        xor     a
+        ld      (_tile_dirty_any), a
+        ld      hl, #_tile_dirty
+        ld      de, #_tile_dirty + 1
+        ld      bc, #TILE_DIRTY_ROWS * TILE_DIRTY_STRIDE - 1
+        ld      (hl), #0
+        ldir
+        ret
+
+; _sync_tiles_to_shadow: copy every dirty 8x8 cell from the visible buffer's
+;   mirror to the hidden buffer (page #50). Called by swap_screen AFTER the flip
+;   and AFTER the sprite restore. Phase 1 = DI.
+_sync_tiles_to_shadow::
+        ; Only sync while sprites are active (mirrors EvoSDK: updateTilesFromBuffer
+        ; runs inside `if spritesActive`). When sprites are stopped the game gets
+        ; raw double buffering, so intentional flip-based effects (e.g. the
+        ; level-end picture/field flash) keep working.
+        ld      a, (_sprites_active)
+        or      a
+        ret     z
+        ld      a, (_tile_dirty_any)
+        or      a
+        ret     z
+        di
+        in      a, (#0xE2)
+        ld      (_sync_saved_win3), a
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a
+
+        ; visible base / hidden base from RGMOD.0
+        in      a, (#0xC9)
+        and     #1
+        ld      hl, #VRAM_BUF0_BASE      ; visible 0
+        ld      de, #VRAM_BUF1_BASE      ; hidden 1
+        jr      z, sync_bases_ok
+        ex      de, hl                  ; visible 1 / hidden 0
+sync_bases_ok:
+        ld      (_sync_vis_base), hl
+        ld      (_sync_dst_base), de
+
+        ld      hl, #_tile_dirty        ; bitmap walk
+        xor     a
+        ld      (_sync_ty), a
+sync_row:
+        ld      b, #TILE_DIRTY_STRIDE   ; 5 bytes / row
+        xor     a
+        ld      (_sync_basex), a
+sync_byte:
+        ld      a, (hl)
+        or      a
+        jr      z, sync_byte_next
+        push    hl
+        push    bc
+        ld      c, (hl)                 ; C = 8 dirty bits
+        ld      a, (_sync_basex)
+        ld      (_sync_x), a
+        ld      b, #8
+sync_bit:
+        rr      c
+        jr      nc, sync_bit_next
+        push    bc
+        call    sync_one_cell
+        pop     bc
+sync_bit_next:
+        ld      a, (_sync_x)
+        inc     a
+        ld      (_sync_x), a
+        djnz    sync_bit
+        pop     bc
+        pop     hl
+sync_byte_next:
+        inc     hl
+        ld      a, (_sync_basex)
+        add     a, #8
+        ld      (_sync_basex), a
+        djnz    sync_byte
+        ld      a, (_sync_ty)
+        inc     a
+        ld      (_sync_ty), a
+        cp      #TILE_DIRTY_ROWS
+        jr      nz, sync_row
+
+        xor     a
+        ld      (_tile_dirty_any), a
+        ; clear the bitmap for the next frame
+        ld      hl, #_tile_dirty
+        ld      de, #_tile_dirty + 1
+        ld      bc, #TILE_DIRTY_ROWS * TILE_DIRTY_STRIDE - 1
+        ld      (hl), #0
+        ldir
+
+        ld      a, #0xC0
+        out     (#0x89), a
+        ld      a, (_sync_saved_win3)
+        out     (#0xE2), a
+        ret
+
+; sync_one_cell: copy the 8x8 cell at (_sync_x, _sync_ty) from the visible
+;   buffer (mirror) to the hidden buffer via the accelerator. WIN3 = #50.
+sync_one_cell:
+        ld      a, (_sync_x)            ; x*8 (16-bit)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        ld      de, (_sync_dst_base)
+        add     hl, de
+        ld      (_sync_dst), hl         ; dst column = hidden base + x*8
+        ld      a, (_sync_x)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        ld      de, (_sync_vis_base)
+        add     hl, de                  ; HL = src column = visible base + x*8
+        ld      de, (_sync_dst)         ; DE = dst column
+        ld      a, (_sync_ty)           ; PORT_Y = ty*8 + 28
+        add     a, a
+        add     a, a
+        add     a, a
+        add     a, #VRAM_Y_OFFSET
+        ld      b, a                    ; B = PORT_Y
+        ld      c, #8                   ; 8 rows
+sync_cell_row:
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d                    ; accel: set block size
+        ld      a, #8
+        ld      l, l                    ; accel: copy row (mirror -> VRAM)
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b                    ; accel: off
+        inc     b                       ; next scanline
+        dec     c
+        jr      nz, sync_cell_row
+        ret
+
         .area   _SDKDATA
+_tile_dirty_any:
+        .db     0
+_sync_saved_win3:
+        .db     0
+_sync_ty:
+        .db     0
+_sync_basex:
+        .db     0
+_sync_x:
+        .db     0
+_sync_vis_base:
+        .dw     0
+_sync_dst_base:
+        .dw     0
+_sync_dst:
+        .dw     0
+_tile_dirty:
+        .ds     TILE_DIRTY_ROWS * TILE_DIRTY_STRIDE
 _image_base_tile:
         .dw     0
 _image_width_tiles:
@@ -234,6 +565,8 @@ _image_width_tiles:
 _image_height_tiles:
         .db     0
 _image_selected:
+        .db     0
+_color_key_value:
         .db     0
 _draw_src:
         .dw     0

@@ -1,6 +1,5 @@
-APP  = robo
-SRCS = main.c
+PROJECT := .
 
-SCREEN_MODE ?= compat
+all: exe
 
-include ../sprinter/sprinter.mk
+include ../sprintersdk/sprinter.mk

@@ -16,9 +16,10 @@ SDK_DIR ?= $(dir $(lastword $(MAKEFILE_LIST)))
 include $(SDK_DIR)toolchain.mk
 
 PROJECT  ?= .
-OUT      ?= app
 BUILD    ?= $(PROJECT)/_build
 MANIFEST ?= $(PROJECT)/compile.bat
+MANIFEST_OUTPUT := $(strip $(shell LC_ALL=C awk -F= 'tolower($$1) ~ /^[[:space:]]*set[[:space:]]+output[[:space:]]*$$/ {gsub(/\r/,"",$$2); print $$2; exit}' "$(MANIFEST)" 2>/dev/null))
+OUT      ?= $(if $(MANIFEST_OUTPUT),$(basename $(notdir $(MANIFEST_OUTPUT))),app)
 RESGEN   ?= $(SDK_DIR)tools/resgen.py
 ASSETPACK ?= $(SDK_DIR)tools/assetpack.py
 DSS_EXE  ?= $(SDK_DIR)tools/dss_exe.py
@@ -31,6 +32,7 @@ IHX2BIN  ?= $(SDK_DIR)tools/ihx2bin.py
 LOADER_SRC ?= $(SDK_DIR)loader.asm
 LOADER_BIN ?= $(BUILD)/loader.bin
 LOADER_ORG ?= 0x8100           # WIN2: canonical DSS program window (see loader.asm)
+PACK_STAMP ?= $(BUILD)/pack.stamp
 
 # Scheme C (mirror of EvoSDK): SDK code+data live in the SRAM region #0000-#1FFF
 # (like EvoSDK #E000-#FFFF), the stack at #2000-#23FF, and C code+data is one
@@ -51,10 +53,11 @@ RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
 # SDK libraries by EvoSDK responsibility zone (mirror of evosdk/ file names).
 SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound
 LIB_RELS := $(patsubst %,$(BUILD)/%.rel,$(SDK_LIB))
-OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/main.rel $(RTL_RELS)
+OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/evo.rel $(BUILD)/main.rel $(RTL_RELS)
 
-.PHONY: all clean resources assets exe
+.PHONY: all clean resources assets exe sprinter FORCE
 all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
+sprinter: exe
 
 resources: $(RESOURCES_H)
 assets: $(ASSETS_DAT)
@@ -72,6 +75,13 @@ else
 DSS_PACK_ARGS :=
 endif
 
+FORCE:
+
+$(PACK_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'PACK_ASSETS=$(PACK_ASSETS)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
 $(BUILD)/loader.rel: $(LOADER_SRC) | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
@@ -85,7 +95,7 @@ $(LOADER_BIN): $(BUILD)/loader.rel
 # Monoblock DSS PRELOAD EXE: header + loader + paged code/assets inside.
 # DSS loads only the loader (#4100/WIN1); it stages code into pages, copies the
 # hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
-$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN)
+$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP)
 	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
 	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) $(DSS_PACK_ARGS)
 
@@ -113,6 +123,12 @@ $(BUILD)/%.rel: $(SDK_DIR)%.asm | $(BUILD)
 	cp $@ $(basename $@).o
 
 # --- C (.c) -> .rel (в три шага, см. шапку) ---
+$(BUILD)/evo.rel: $(SDK_DIR)evo.c $(SDK_DIR)evo.h | $(BUILD)
+	$(SDCPP) $(CPPFLAGS) $< > $(BUILD)/evo.i
+	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/evo.asm < $(BUILD)/evo.i
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/evo.asm
+	cp $@ $(basename $@).o
+
 $(BUILD)/main.rel: $(PROJECT)/main.c $(RESOURCES_H) | $(BUILD)
 	$(SDCPP) $(CPPFLAGS) $< > $(BUILD)/main.i
 	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/main.asm < $(BUILD)/main.i

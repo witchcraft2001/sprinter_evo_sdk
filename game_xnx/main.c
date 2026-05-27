@@ -213,6 +213,13 @@ void put_str(u8 x,u8 y,u8* str)
 
 
 
+u8 input_fire_pressed(void)
+{
+	keyboard(keys);
+	return (keys[KEY_SPACE]&KEY_PRESS)||(joystick()&JOY_FIRE);
+}
+
+
 void put_num(u8 x,u8 y,u16 num,u8 figs)
 {
 	x+=figs;
@@ -1021,10 +1028,10 @@ u8 game_loop(void)
 		{
 			i=joystick();
 
-			if(keys[KEY_Q]) i|=JOY_UP;
-			if(keys[KEY_A]) i|=JOY_DOWN;
-			if(keys[KEY_O]) i|=JOY_LEFT;
-			if(keys[KEY_P]) i|=JOY_RIGHT;
+			if(keys[KEY_Q]||keys[KEY_7]) i|=JOY_UP;
+			if(keys[KEY_A]||keys[KEY_6]) i|=JOY_DOWN;
+			if(keys[KEY_O]||keys[KEY_5]) i|=JOY_LEFT;
+			if(keys[KEY_P]||keys[KEY_8]) i|=JOY_RIGHT;
 
 			if(!player.off)
 			{
@@ -1337,7 +1344,7 @@ void title_screen(void)
 
 		swap_screen();
 
-		if(joystick()&JOY_FIRE) done=TRUE;
+		if(input_fire_pressed()) done=TRUE;
 
 		++frame;
 	}
@@ -1381,7 +1388,7 @@ void gameover_screen(void)
 	{
 		vsync();
 
-		if(joystick()&JOY_FIRE) break;
+		if(input_fire_pressed()) break;
 	}
 
 	music_stop();
@@ -1418,7 +1425,7 @@ void welldone_screen(void)
 	{
 		vsync();
 
-		if(joystick()&JOY_FIRE) break;
+		if(input_fire_pressed()) break;
 	}
 
 	music_stop();

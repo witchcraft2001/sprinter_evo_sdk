@@ -264,9 +264,18 @@
       сжимает 16-КБ страницы кода/ассетов с проверкой `mhmt -d`, оставляя `EVP1`-метаданные
       несжатыми. `PACK_ASSETS=1` в `sprinter.mk` включает packed-моноблок, дефолтная сборка
       без `mhmt` остаётся raw.
-- ⬜ `Makefile` (SDK-уровня и проектного уровня): сборка `evo.c` + asm-библиотек + crt0 +
+- ✅ `Makefile` (SDK-уровня и проектного уровня): сборка `evo.c` + asm-библиотек + crt0 +
       ассетов в EXE. Команда сборки проекта — одна `make`-цель.
-- ⬜ `sprintersdk/evo.h`: тот же API, что `evosdk/evo.h` (идентичные сигнатуры/константы).
+      → `sprinter.mk` сам берёт имя EXE из `set output=...` в CP866/CRLF `compile.bat`
+      (`LC_ALL=C awk`), `make` из каталога проекта строит Sprinter EXE через короткий
+      проектный `Makefile`; `PACK_ASSETS=1/0` корректно переключает packed/raw EXE через
+      stamp-зависимость. Добавлены/исправлены Makefile для `empty_project`, `example_*`,
+      `game_xnx`, `innsmouth`, `robo`. `sprintersdk/evo.c` добавлен в SDK-карту и сборку;
+      сейчас это пустой файл-заглушка, потому что Sprinter asm-библиотеки уже экспортируют
+      C ABI-символы напрямую (без C-wrapper дублей).
+- ✅ `sprintersdk/evo.h`: тот же API, что `evosdk/evo.h` (идентичные сигнатуры/константы).
+      → Сверено с `evosdk/evo.h`: типы, константы и объявления функций совпадают; отличие
+      только в Sprinter-комментарии о контракте.
 
 **Критерий выхода:** `empty_project` собирается в EXE и **запускается на эмуляторе
 Sprinter** (чёрный экран, не падает, отрабатывает `main`/`vsync`/`delay`).
@@ -306,6 +315,11 @@ Sprinter** (чёрный экран, не падает, отрабатывает
       обновляется). Готовый референс — git-stash `HW-keyed 0x58 experiment` в `evosdk_libs`
       (`evo_draw_tile.s`/`evoasm.py`/`evo_internal.h`); см. `HW_NOTES.md` §13. Картинки,
       рисуемые и keyed и unkeyed — на CPU-фолбэке.
+      → Реализован обязательный EvoSDK-compatible fallback: `color_key(col)` сохраняет
+      динамический ключ, `draw_tile_key` рисует 8×8 тайл с per-byte compare/skip в текущий
+      back buffer. Это закрывает корректность существующих игр (`game_xnx` и др.), где ключ
+      задаётся вызовом `color_key()` в рантайме. Fast path `color_key.N → 0xFF/#58` остаётся
+      отдельной оптимизацией формата ассетов.
 - ⬜ Двойная буферизация: `swap_screen` + теневой экран, `vsync` автоматический.
 
 **Критерий выхода:** `example_slideshow` и тайловый вывод `game_xnx` (титул, шрифты,
