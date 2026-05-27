@@ -20,11 +20,14 @@
 ;  Sequence:
 ;    1. Save FM + original video mode (DSS GetVMod).
 ;    2. Read the 16-byte body mini-header (K code chunks, M asset pages,
-;       meta_size, hot_size, entry).
+;       flags, meta_size, hot_size, entry). If flags.bit0 is set, read the
+;       (K+M) word payload-size table; 0x4000=raw page, smaller=HRUST .hst.
 ;    3. DSS SetVMod #81 (320x256x8) on both buffer pages -- done here while
 ;       WIN0=DSS, so the SRAM runtime never has to call DSS for video.
-;    4. For each of K code chunks: GetMem a page, map it to WIN1, Dss.Read
-;       16 KB into #4000. chunk0 -> SRAM(hot), 1->WIN1, 2->WIN2, 3->WIN3.
+;    4. For each of K code chunks: GetMem a page, read raw 16 KB into it, or
+;       read the HRUST .hst into the dest page (WIN3 #C000) and DePACK it in
+;       place -- exactly like sdcc-sprinter-sdk asset_load_pages.c. No temp
+;       page, no cross-window depack. chunk0 -> SRAM(hot), 1->WIN1,2->WIN2,3->WIN3.
 ;    5. Read EVP1 metadata + M asset pages; record asset pages in the table.
 ;    6. Write the SDK tables (page table #1A00, saved vmode #1A40) into chunk0
 ;       via the WIN1 staging view (#4000+offset), before chunk0 is LDIR'd.
@@ -65,13 +68,20 @@ l_fm        =       0xBC00          ; file handle
 l_vmode     =       0xBC02          ; original DSS video mode
 l_K         =       0xBC03          ; code chunk count
 l_M         =       0xBC04          ; asset page count
+l_flags     =       0xBC05          ; mini-header flags; bit0 = packed pages
 l_meta      =       0xBC06          ; word: EVP1 meta byte count
 l_hot       =       0xBC08          ; word: bytes of chunk0 to copy into SRAM
 l_entry     =       0xBC0A          ; word: game entry
+l_page_tmp  =       0xBC0C          ; scratch: destination page being loaded
 l_pages     =       0xBC10          ; 4 bytes: code chunk physical pages
 l_assets    =       0xBC20          ; up to 64 bytes: asset physical pages
 l_hdr       =       0xBC80          ; 16-byte mini-header read buffer
+l_sizes     =       0xBCA0          ; up to 68 words: packed payload sizes
+l_hrust_sp  =       0xBD40          ; saved loader SP while HRUST uses SP as input
+l_hrust_stack_top =  0xBD80          ; small private stack for the HRUST depacker
 LOADER_SP   =       0xBFFF          ; loader stack top (own WIN2 page)
+
+MINI_FLAG_PACKED =  0x01
 
 ; ---- SDK runtime tables live in the SDK SRAM region (mirror of EvoSDK
 ;      #E000-#FFFF). The loader writes them into chunk0 (which it then LDIRs into
@@ -112,6 +122,8 @@ _loader_entry::
         ld      (l_K), a
         ld      a, (l_hdr+2)            ; M
         ld      (l_M), a
+        ld      a, (l_hdr+3)            ; flags
+        ld      (l_flags), a
         ld      hl, (l_hdr+4)           ; meta_size
         ld      (l_meta), hl
         ld      hl, (l_hdr+6)           ; hot_size
@@ -119,19 +131,31 @@ _loader_entry::
         ld      hl, (l_hdr+8)           ; entry
         ld      (l_entry), hl
 
-        ; --- 3. set video mode #81 on both screen pages, same order as
-        ;        flappybird ChangeVideoMode: B=1, then B=0. WIN0=DSS here;
-        ;        this clobbers WIN1, which is fine -- the loader is in WIN2. ---
+        ; --- 3. Video mode is set AFTER loading (step 6b), not here, so the
+        ;        screen stays in DSS text mode during loading (no graphics
+        ;        garbage flash) and switches to 320x256x8 only before the jump. ---
+
+        ; --- 3b. Optional packed-body setup: read the (K+M)*2 payload size
+        ;        table. Packed pages are depacked in place in the dest window;
+        ;        raw pages (size 0x4000) load exactly like uncompressed bodies. ---
+        ld      a, (l_flags)
+        and     #MINI_FLAG_PACKED
+        jr      z, no_packed_table
+        ld      a, (l_K)
+        ld      b, a
+        ld      a, (l_M)
+        add     a, b
+        ld      l, a
+        ld      h, #0
+        add     hl, hl                  ; bytes = (K+M)*2
+        ex      de, hl
+        ld      hl, #l_sizes
+        ld      a, (l_fm)
+        ld      c, #DSS_READ
         push    ix
-        ld      a, #VIDEO_MODE
-        ld      b, #1
-        ld      c, #DSS_SETVMOD
-        rst     #0x10
-        ld      a, #VIDEO_MODE
-        ld      b, #0
-        ld      c, #DSS_SETVMOD
         rst     #0x10
         pop     ix
+no_packed_table:
 
         ; --- 4. load K code chunks (each: GetMem -> WIN1 -> read 16K) ---
         ld      b, #0                   ; chunk index
@@ -148,8 +172,20 @@ load_code_loop:
         ld      hl, #l_pages
         add     hl, bc                  ; &l_pages[i]
         ld      (hl), a
+        ld      (l_page_tmp), a
+        ld      a, (l_flags)
+        and     #MINI_FLAG_PACKED
+        jr      z, load_code_raw
+        ld      b, c                    ; restore B = chunk index (C kept it after
+        call    payload_size_b          ; the l_pages calc zeroed B)
+        ld      a, (l_page_tmp)
+        call    read_payload_page
+        jr      load_code_next
+load_code_raw:
+        ld      a, (l_page_tmp)
         out     (SLOT1), a              ; WIN1 = chunk page
         call    read_16k_win1
+load_code_next:
         pop     bc
         inc     b
         jr      load_code_loop
@@ -186,8 +222,22 @@ asset_loop:
         ld      hl, #l_assets
         add     hl, bc
         ld      (hl), a                 ; l_assets[j] = phys page
+        ld      (l_page_tmp), a
+        ld      a, (l_flags)
+        and     #MINI_FLAG_PACKED
+        jr      z, load_asset_raw
+        ld      a, (l_K)
+        add     a, c                    ; index = K + asset index (C kept it; B was
+        ld      b, a                    ; zeroed by the l_assets calc)
+        call    payload_size_b
+        ld      a, (l_page_tmp)
+        call    read_payload_page
+        jr      load_asset_next
+load_asset_raw:
+        ld      a, (l_page_tmp)
         out     (SLOT1), a
         call    read_16k_win1
+load_asset_next:
         pop     bc
         inc     b
         jr      asset_loop
@@ -207,6 +257,21 @@ asset_done:
         ld      de, #STAGE_PAGE_TABLE   ; copy asset phys pages -> page table
         ldir
 tables_done:
+
+        ; --- 6b. Set video mode #81 on both screen pages (after loading, so the
+        ;        screen stays in text mode during load). Order B=1 then B=0 as
+        ;        flappybird ChangeVideoMode. SetVMod clobbers WIN1; step 7 re-maps
+        ;        WIN1=chunk0 right after. ---
+        push    ix
+        ld      a, #VIDEO_MODE
+        ld      b, #1
+        ld      c, #DSS_SETVMOD
+        rst     #0x10
+        ld      a, #VIDEO_MODE
+        ld      b, #0
+        ld      c, #DSS_SETVMOD
+        rst     #0x10
+        pop     ix
 
         ; --- 7. CACHE on, LDIR chunk0 (mapped via WIN1) into WIN0 SRAM ---
         ld      a, (l_pages+0)
@@ -256,4 +321,290 @@ read_16k_win1:
         push    ix
         rst     #0x10
         pop     ix
+        ret
+
+; payload_size_b: B = payload index -> DE = size table entry.
+payload_size_b:
+        ld      c, b
+        ld      b, #0
+        ld      hl, #l_sizes
+        add     hl, bc
+        add     hl, bc
+        ld      e, (hl)
+        inc     hl
+        ld      d, (hl)
+        ret
+
+; read_payload_page: A = destination physical page, DE = payload size.
+;   size 0x4000: raw page read directly into destination via WIN1.
+;   otherwise: read .hst into the temp page (WIN1), map destination to WIN3,
+;   and HRUST-depack #4000 -> #C000.
+read_payload_page:
+        push    af
+        ld      a, d                    ; size 0 = all-zero page -> zero-fill,
+        or      e                       ; no DSS read, no depack (avoids the
+        jr      nz, read_payload_sized  ; depacker's degenerate empty-page case)
+        pop     af
+        out     (SLOT3), a              ; WIN3 = dest page
+        jp      zero_fill_win3
+read_payload_sized:
+        ld      a, d
+        cp      #0x40
+        jr      nz, read_payload_packed
+        ld      a, e
+        or      a
+        jr      nz, read_payload_packed
+        pop     af
+        out     (SLOT1), a
+        jp      read_16k_win1
+
+; zero_fill_win3: fill the WIN3 destination page (#C000-#FFFF, 16K) with zero.
+zero_fill_win3:
+        ld      hl, #0xC000
+        ld      (hl), #0
+        ld      de, #0xC001
+        ld      bc, #0x3FFF
+        ldir
+        ret
+
+read_payload_packed:
+        ; In-place depack in the destination window, identical to the proven
+        ; sdcc-sprinter-sdk asset_load_pages.c (read .hst to #C000, DePACK
+        ; #C000 -> #C000). DE still holds the payload byte count.
+        pop     af                      ; A = destination physical page
+        out     (SLOT3), a              ; WIN3 = destination page
+        ld      hl, #0xC000             ; read the .hst into the dest window
+        ld      a, (l_fm)
+        ld      c, #DSS_READ
+        push    ix
+        rst     #0x10
+        pop     ix
+        ld      hl, #0xC000
+        ld      de, #0xC000
+        call    hrust_depack_loader
+        ret
+
+; HRUST .hst depacker from kode/DEPACK / sdcc-sprinter-sdk hrust_depack.s.
+; Wrapper contract here: HL=packed source, DE=destination. The depacker uses SP
+; as its compressed input pointer, so it runs on a private scratch stack and the
+; loader SP is restored before returning.
+hrust_depack_loader:
+        push    ix
+        ld      (l_hrust_sp), sp
+        ld      sp, #l_hrust_stack_top
+        call    hrust_depack_hl_de
+        ld      sp, (l_hrust_sp)
+        pop     ix
+        ret
+
+hrust_depack_hl_de:
+        di
+        ld      ix, #0xFFF4
+        add     ix, sp
+        push    de
+        ld      sp, hl
+        pop     bc
+        ex      de, hl
+        pop     bc
+        dec     bc
+        add     hl, bc
+        ex      de, hl
+        pop     bc
+        dec     bc
+        add     hl, bc
+        sbc     hl, de
+        add     hl, de
+        jr      c, hrust_8018
+        ld      d, h
+        ld      e, l
+hrust_8018:
+        lddr
+        ex      de, hl
+        ld      d, 11(ix)
+        ld      e, 10(ix)
+        ld      sp, hl
+        pop     hl
+        pop     hl
+        pop     hl
+        ld      b, #0x06
+hrust_8027:
+        dec     sp
+        pop     af
+        ld      6(ix), a
+        inc     ix
+        djnz    hrust_8027
+        exx
+        ld      d, #0xBF
+        ld      bc, #0x1010
+        pop     hl
+hrust_8037:
+        dec     sp
+        pop     af
+        exx
+hrust_803A:
+        ld      (de), a
+        inc     de
+hrust_803C:
+        exx
+hrust_803D:
+        add     hl, hl
+        djnz    hrust_8042
+        pop     hl
+        ld      b, c
+hrust_8042:
+        jr      c, hrust_8037
+        ld      e, #0x01
+hrust_8046:
+        ld      a, #0x80
+hrust_8048:
+        add     hl, hl
+        djnz    hrust_804D
+        pop     hl
+        ld      b, c
+hrust_804D:
+        rla
+        jr      c, hrust_8048
+        cp      #0x03
+        jr      c, hrust_8059
+        add     a, e
+        ld      e, a
+        xor     c
+        jr      nz, hrust_8046
+hrust_8059:
+        add     a, e
+        cp      #0x04
+        jr      z, hrust_80B8
+        adc     a, #0xFF
+        cp      #0x02
+        exx
+hrust_8063:
+        ld      c, a
+hrust_8064:
+        exx
+        ld      a, #0xBF
+        jr      c, hrust_807D
+hrust_8069:
+        add     hl, hl
+        djnz    hrust_806E
+        pop     hl
+        ld      b, c
+hrust_806E:
+        rla
+        jr      c, hrust_8069
+        jr      z, hrust_8078
+        inc     a
+        add     a, d
+        jr      nc, hrust_807F
+        sub     d
+hrust_8078:
+        inc     a
+        jr      nz, hrust_8087
+        ld      a, #0xEF
+hrust_807D:
+        rrca
+        cp      a
+hrust_807F:
+        add     hl, hl
+        djnz    hrust_8084
+        pop     hl
+        ld      b, c
+hrust_8084:
+        rla
+        jr      c, hrust_807F
+hrust_8087:
+        exx
+        ld      h, #0xFF
+        jr      z, hrust_8092
+        ld      h, a
+        dec     sp
+        inc     a
+        jr      z, hrust_809D
+        pop     af
+hrust_8092:
+        ld      l, a
+        add     hl, de
+        ldir
+hrust_8096:
+        jr      hrust_803C
+hrust_8098:
+        exx
+        rrc     d
+        jr      hrust_803D
+hrust_809D:
+        pop     af
+        cp      #0xE0
+        jr      c, hrust_8092
+        rlca
+        xor     c
+        inc     a
+        jr      z, hrust_8098
+        sub     #0x10
+hrust_80A9:
+        ld      l, a
+        ld      c, a
+        ld      h, #0xFF
+        add     hl, de
+        ldi
+        dec     sp
+        pop     af
+        ld      (de), a
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        jr      hrust_803A
+hrust_80B8:
+        ld      a, #0x80
+hrust_80BA:
+        add     hl, hl
+        djnz    hrust_80BF
+        pop     hl
+        ld      b, c
+hrust_80BF:
+        adc     a, a
+        jr      nz, hrust_80DB
+        jr      c, hrust_80BA
+        ld      a, #0xFC
+        jr      hrust_80DE
+hrust_80C8:
+        dec     sp
+        pop     bc
+        ld      c, b
+        ld      b, a
+        ccf
+        jr      hrust_8064
+hrust_80CF:
+        cp      #0x0F
+        jr      c, hrust_80C8
+        jr      nz, hrust_8063
+        add     a, #0xF4
+        ld      sp, ix
+        jr      hrust_80EF
+hrust_80DB:
+        sbc     a, a
+        ld      a, #0xEF
+hrust_80DE:
+        add     hl, hl
+        djnz    hrust_80E3
+        pop     hl
+        ld      b, c
+hrust_80E3:
+        rla
+        jr      c, hrust_80DE
+        exx
+        jr      nz, hrust_80A9
+        bit     7, a
+        jr      z, hrust_80CF
+        sub     #0xEA
+hrust_80EF:
+        ex      de, hl
+hrust_80F0:
+        pop     de
+        ld      (hl), e
+        inc     hl
+        ld      (hl), d
+        inc     hl
+        dec     a
+        jr      nz, hrust_80F0
+        ex      de, hl
+        jr      nc, hrust_8096
         ret

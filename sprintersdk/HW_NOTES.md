@@ -594,26 +594,27 @@ accel — грамотны и в основном оптимальны (это a
 Пропуск sprite-листа (нет файла / не 8bpp / не кратно 16) — **общая функция
 `resgen.bmp_sprite_count`** в обоих инструментах, чтобы SPR-ID не разъезжались.
 
-### 14.1 Опциональная HRUST-упаковка `SPK1` [V]
+### 14.1 Опциональная HRUST-упаковка моноблочного EXE [V]
 
 Источник: `sdcc-sprinter-sdk/tools/pack_asset.py`, `sdcc-sprinter-sdk/docs/*`; локальные
 копии инструментов лежат в `sprintersdk/tools/bin/` (`mhmt` для macOS/Linux-сборки,
 `hrust.exe` — Windows HRUST-компрессор из `kode/Tools/hrust.exe`; `mhmt.exe` в
 `kode`/`flexnavigator` не найден).
 
-По умолчанию `PACK_ASSETS=0`, и `sprintersdk/tools/assetpack.py` пишет raw `EVOS` прямо в
-`_build/assets.dat`.
+По умолчанию `PACK_ASSETS=0`, и `sprintersdk/tools/assetpack.py --paged` пишет raw `EVP1`
+в `_build/assets.dat`; `dss_exe.py` кладёт в моноблок несжатые страницы кода и ассетов.
 
-При `PACK_ASSETS=1` make-цепочка такая:
-1. `assetpack.py` пишет raw `EVOS` в `_build/assets.raw.dat`;
-2. `pack_spk.py` режет raw файл на чанки по 16 КБ, сжимает каждый через
-   `mhmt -hst -zxh`, проверяет `mhmt -d`, и пишет `_build/assets.dat` как контейнер
-   `SPK1`.
+При `PACK_ASSETS=1` `assets.dat` **остаётся raw `EVP1`** (это контракт загрузчика/SDK), а
+`dss_exe.py --pack` сжимает 16-КБ страницы кода и ассетов внутри тела PRELOAD EXE через
+`mhmt -hst -zxh` с проверкой `mhmt -d`. Мини-заголовок загрузчика получает `flags.bit0=1`,
+после него идёт `(K+M)` слов размеров payload'ов: `0x4000` означает raw-страницу, значение
+меньше `0x4000` — HRUST `.hst`, который `loader.asm` читает в temp-страницу и распаковывает
+`DePACK` в выделенную DSS-страницу назначения. Метаданные `EVP1` остаются несжатыми и
+читаются напрямую в SRAM-область `EVO_META`.
 
-`SPK1` header: `BYTE 'SPK1'`, `BYTE version=1`, `BYTE chunk_count`, `WORD reserved=0`.
-Дальше для каждого чанка: `BYTE flag` (`0=raw`, `1=HRUST`), `WORD raw_len`,
-`WORD data_len`, затем `data_len` байт payload. Если сжатый чанк не меньше исходного,
-пишется raw-чанк (`flag=0`). Сборка без `mhmt` не ломается, пока `PACK_ASSETS=0`.
+Сборка без `mhmt` не ломается, пока `PACK_ASSETS=0`. `pack_spk.py` сохранён как host-tool
+для плоских `SPK1` контейнеров, но текущий PRELOAD-путь использует постраничную упаковку
+в `dss_exe.py`, чтобы не подменять `EVP1` несовместимым форматом.
 
 ---
 

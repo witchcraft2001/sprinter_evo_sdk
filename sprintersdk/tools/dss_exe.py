@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import struct
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -27,6 +30,7 @@ LOADER_LOAD = 0x8100
 LOADER_SP = 0xBFFF
 MINIHDR_SIZE = 16
 MINIHDR_MAGIC = ord("L")
+MINIHDR_FLAG_PACKED = 0x01
 EVP_MAGIC = b"EVP1"
 EVP_HEADER_SIZE = 16
 # SDK SRAM table region (loader.asm EVO_*): #1A00 page table / #1A40 vmode /
@@ -207,10 +211,78 @@ def parse_evp1(bundle: bytes) -> tuple[bytes, list[bytes]]:
     return meta_blob, pages
 
 
-def build_monoblock(code: bytes, loader: bytes, assets: bytes, entry: int) -> bytes:
+def run_tool(args: list[str]) -> bytes:
+    try:
+        result = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as exc:
+        output = exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
+        raise SystemExit(f"dss_exe: tool failed: {' '.join(args)}\n{output}") from exc
+    return result.stdout
+
+
+def pack_page(mhmt: Path, page: bytes, index: int, tmpdir: Path) -> tuple[int, bytes]:
+    if len(page) != PAGE:
+        raise SystemExit(f"dss_exe: internal error: page {index} is {len(page)} bytes")
+
+    # All-zero page: emit size 0 (no payload). The loader zero-fills it directly,
+    # skipping the HRUST depacker -- which mis-decodes the degenerate "16K of
+    # zeros" stream by reading past it into the uninitialized destination page.
+    if not any(page):
+        return 0, b""
+
+    raw = tmpdir / f"page{index:03d}.raw"
+    packed = tmpdir / f"page{index:03d}.hst"
+    depacked = tmpdir / f"page{index:03d}.dpk"
+
+    raw.write_bytes(page)
+    run_tool([str(mhmt), "-hst", "-zxh", str(raw), str(packed)])
+    packed_data = packed.read_bytes()
+
+    if len(packed_data) >= PAGE:
+        return PAGE, page
+
+    run_tool([str(mhmt), "-d", "-hst", "-zxh", str(packed), str(depacked)])
+    if depacked.read_bytes() != page:
+        raise SystemExit(f"dss_exe: mhmt verification failed for page {index}")
+
+    return len(packed_data), packed_data
+
+
+def pack_pages(pages: list[bytes], mhmt: Path) -> tuple[list[int], list[bytes], int]:
+    if not mhmt.is_file() or not os.access(mhmt, os.X_OK):
+        raise SystemExit(f"dss_exe: mhmt is not executable: {mhmt}")
+
+    sizes: list[int] = []
+    payloads: list[bytes] = []
+    saved = 0
+    with tempfile.TemporaryDirectory(prefix="spevo-exe-pack-") as tmp:
+        tmpdir = Path(tmp)
+        for index, page in enumerate(pages):
+            size, payload = pack_page(mhmt, page, index, tmpdir)
+            sizes.append(size)
+            payloads.append(payload)
+            saved += PAGE - len(payload)
+    return sizes, payloads, saved
+
+
+def build_monoblock(
+    code: bytes,
+    loader: bytes,
+    assets: bytes,
+    entry: int,
+    *,
+    pack: bool = False,
+    mhmt: Path | None = None,
+) -> tuple[bytes, int, int, int, int]:
     """Assemble a DSS PRELOAD monoblock EXE the loader.asm reads.
 
-    Body = [16B mini-header][K=4 x 16 KB code chunks][meta][M x 16 KB asset pages].
+    Unpacked body:
+        [16B mini-header][K x 16 KB code chunks][meta][M x 16 KB asset pages].
+    Packed body:
+        [16B mini-header][(K+M) x u16 payload sizes]
+        [K code payloads][meta][M asset payloads].
+
+    A payload size of 0x4000 means raw 16 KB; any smaller size is HRUST .hst.
     """
     if assets:
         meta_blob, data_pages = parse_evp1(assets)
@@ -221,6 +293,7 @@ def build_monoblock(code: bytes, loader: bytes, assets: bytes, entry: int) -> by
     chunks_needed = (len(code) + PAGE - 1) // PAGE
     k = max(MONOBLOCK_CODE_CHUNKS, chunks_needed)
     image = code + bytes(k * PAGE - len(code))
+    code_pages = [image[i * PAGE:(i + 1) * PAGE] for i in range(k)]
 
     # SDK code+data must stay below the loader's table region, and C must start
     # at #2400 -- so nothing should occupy #1A00..#23FF in the image.
@@ -245,13 +318,35 @@ def build_monoblock(code: bytes, loader: bytes, assets: bytes, entry: int) -> by
     minihdr[0] = MINIHDR_MAGIC
     minihdr[1] = k
     minihdr[2] = m
+    if pack:
+        minihdr[3] = MINIHDR_FLAG_PACKED
     struct.pack_into("<H", minihdr, 4, len(meta_blob))
     struct.pack_into("<H", minihdr, 6, MONOBLOCK_HOT_SIZE)
     struct.pack_into("<H", minihdr, 8, entry)
 
     header = make_header(LOADER_LOAD, LOADER_LOAD, LOADER_SP, loader_size=len(loader))
-    body = bytes(minihdr) + image + meta_blob + b"".join(data_pages)
-    return header + loader + body, k, m, len(meta_blob)
+    saved = 0
+
+    if pack:
+        if mhmt is None:
+            raise SystemExit("dss_exe: --pack requires --mhmt <path>")
+        sizes, payloads, saved = pack_pages(code_pages + data_pages, mhmt)
+        size_table = bytearray()
+        for size in sizes:
+            if not 0 <= size <= PAGE:        # 0 = all-zero page (loader zero-fills)
+                raise SystemExit(f"dss_exe: invalid packed payload size {size}")
+            size_table += struct.pack("<H", size)
+        body = (
+            bytes(minihdr)
+            + bytes(size_table)
+            + b"".join(payloads[:k])
+            + meta_blob
+            + b"".join(payloads[k:])
+        )
+    else:
+        body = bytes(minihdr) + image + meta_blob + b"".join(data_pages)
+
+    return header + loader + body, k, m, len(meta_blob), saved
 
 
 def main(argv: list[str]) -> int:
@@ -280,6 +375,17 @@ def main(argv: list[str]) -> int:
         help="build a DSS PRELOAD monoblock EXE (loader + paged code/assets inside)",
     )
     parser.add_argument("--loader", type=Path, help="assembled PRELOAD loader binary")
+    parser.add_argument(
+        "--pack",
+        action="store_true",
+        help="HRUST-pack monoblock code/asset pages; raw pages are kept when not smaller",
+    )
+    parser.add_argument(
+        "--mhmt",
+        type=Path,
+        default=Path(__file__).resolve().parent / "bin" / "mhmt",
+        help="path to mhmt for --pack",
+    )
     args = parser.parse_args(argv)
 
     if args.monoblock:
@@ -288,15 +394,23 @@ def main(argv: list[str]) -> int:
         code = image_from_zero(parse_ihx(args.input))
         loader = args.loader.read_bytes()
         assets = args.assets.read_bytes() if args.assets else b""
-        exe, k, m, meta = build_monoblock(code, loader, assets, MONOBLOCK_ENTRY)
+        exe, k, m, meta, saved = build_monoblock(
+            code,
+            loader,
+            assets,
+            MONOBLOCK_ENTRY,
+            pack=args.pack,
+            mhmt=args.mhmt,
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         tmp = args.output.with_name(args.output.name + ".tmp")
         tmp.write_bytes(exe)
         tmp.replace(args.output)
+        pack_info = f", packed saved={saved} B" if args.pack else ""
         print(
             f"dss_exe: wrote {args.output} (mode=monoblock, loader={len(loader)} B, "
             f"code={len(code)} B -> {k} chunks, meta={meta} B, asset_pages={m}, "
-            f"total={len(exe)} B)"
+            f"total={len(exe)} B{pack_info})"
         )
         return 0
 

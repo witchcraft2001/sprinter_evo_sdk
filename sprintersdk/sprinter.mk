@@ -21,13 +21,11 @@ BUILD    ?= $(PROJECT)/_build
 MANIFEST ?= $(PROJECT)/compile.bat
 RESGEN   ?= $(SDK_DIR)tools/resgen.py
 ASSETPACK ?= $(SDK_DIR)tools/assetpack.py
-PACKSPK  ?= $(SDK_DIR)tools/pack_spk.py
 DSS_EXE  ?= $(SDK_DIR)tools/dss_exe.py
 MHMT     ?= $(SDK_DIR)tools/bin/mhmt
 PACK_ASSETS ?= 0
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
-ASSETS_RAW ?= $(BUILD)/assets.raw.dat
 EXE      ?= $(BUILD)/$(OUT).exe
 IHX2BIN  ?= $(SDK_DIR)tools/ihx2bin.py
 LOADER_SRC ?= $(SDK_DIR)loader.asm
@@ -65,15 +63,13 @@ exe: $(EXE)
 $(RESOURCES_H): $(MANIFEST) $(RESGEN)
 	$(PYTHON) $(RESGEN) $(MANIFEST) -o $@
 
-ifeq ($(PACK_ASSETS),1)
-$(ASSETS_RAW): $(MANIFEST) $(ASSETPACK) | $(BUILD)
-	$(PYTHON) $(ASSETPACK) $(MANIFEST) -o $@
-
-$(ASSETS_DAT): $(ASSETS_RAW) $(PACKSPK)
-	$(PYTHON) $(PACKSPK) --mhmt $(MHMT) $< $@
-else
 $(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) | $(BUILD)
 	$(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
+
+ifeq ($(PACK_ASSETS),1)
+DSS_PACK_ARGS := --pack --mhmt $(MHMT)
+else
+DSS_PACK_ARGS :=
 endif
 
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
@@ -91,7 +87,7 @@ $(LOADER_BIN): $(BUILD)/loader.rel
 # hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
 $(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN)
 	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
-	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT)
+	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) $(DSS_PACK_ARGS)
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)
