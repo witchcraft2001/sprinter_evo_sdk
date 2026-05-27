@@ -94,10 +94,10 @@ _sprites_start::
         ld      (hl), #0xFF
         ldir
 
-        ; clear saved-valid flags for both buffers (64 each)
-        ld      hl, #_spr_saved_valid
-        ld      de, #_spr_saved_valid + 1
-        ld      bc, #127
+        ; clear all per-buffer saved-rect structs (valid/x/py, both buffers)
+        ld      hl, #_spr_saved
+        ld      de, #_spr_saved + 1
+        ld      bc, #383
         ld      (hl), #0
         ldir
 
@@ -153,6 +153,8 @@ _sprites_render_before_swap::
         or      a
         ret     z
         di                              ; accel requires interrupts off (Phase 1 = DI)
+        push    ix                      ; IX/IY hold the saved-struct + queue ptrs
+        push    iy                      ; across the loop; restore for the C caller
 
         ; back buffer = visible ^ 1; base = #C000 (buf0) / #C140 (buf1)
         in      a, (#0xC9)
@@ -174,97 +176,83 @@ render_base_ok:
 
 ; ---- DRAW: blit the current queue through #5C (transparent, VRAM-only). ----
 ; The back buffer is already clean here: _sprites_restore_after_swap erased its
-; previous-frame sprites (from the mirror) right after the last flip, so a
-; restore pass before drawing would be a no-op. Single restore point = less work
-; per frame and no double-restore interaction.
-        call    select_saved_arrays     ; -> _spr_vptr / _spr_xptr / _spr_yptr
-        ld      hl, #_sprqueue
-        ld      (_spr_qptr), hl
+; previous-frame sprites after the last flip. IY = queue entry, IX = saved-rect
+; struct for this buffer -- both survive the blit calls, so the per-sprite loop
+; touches no scratch RAM. The rect is recorded BEFORE the blit (which clobbers
+; the main registers).
+        call    saved_base_hl           ; HL = saved-struct base for this buffer
+        push    hl
+        pop     ix                      ; IX = saved struct (advances +3 / sprite)
+        ld      iy, #_sprqueue          ; IY = queue entry (advances +4 / sprite)
         ld      a, #VRAM_PAGE_SPR
         out     (#0xE2), a
 
 draw_loop:
-        ld      hl, (_spr_qptr)
-        ld      a, (hl)                 ; idh, #FF = end of queue
+        ld      a, 0 (iy)               ; idh, #FF = end of queue
         cp      #0xFF
         jp      z, draw_done
-        inc     hl
-        ld      a, (hl)                 ; idl = sprite id (0..255)
-        ld      (_spr_id), a
-        inc     hl
-        ld      a, (hl)                 ; y
-        ld      (_spr_yraw), a
-        inc     hl
-        ld      a, (hl)                 ; x (2-pixel units)
-        ld      (_spr_xraw), a
-
-        ; py = y + 28; skip if y + 16 would leave the 256-row frame.
-        ld      a, (_spr_yraw)
-        add     a, #VRAM_Y_OFFSET
-        cp      #241
+        ld      a, 3 (iy)               ; x (2-pixel units)
+        cp      #153                    ; x*2 >= 306 -> +16 > 320: skip
         jr      nc, draw_skip
-        ld      (_spr_py), a
-
-        ; x*2 byte offset; skip if it would run past the 320-px right edge.
-        ld      a, (_spr_xraw)
-        cp      #153                    ; x*2 >= 306 -> +16 > 320
+        ld      a, 2 (iy)               ; y
+        add     a, #VRAM_Y_OFFSET       ; py
+        cp      #241                    ; py + 16 > 256: skip
         jr      nc, draw_skip
+
+        ld      2 (ix), a               ; saved py
+        ld      b, a                    ; B = py (PORT_Y for blit)
+        ld      a, #1
+        ld      0 (ix), a               ; saved valid = 1
+        ld      a, 3 (iy)               ; x
+        ld      1 (ix), a               ; saved x
+
+        ; dest = back-buffer base + x*2
         ld      l, a
         ld      h, #0
-        add     hl, hl                  ; x*2 (16-bit)
-        ld      bc, (_spr_base)
-        add     hl, bc
-        ld      (_spr_dest), hl
+        add     hl, hl
+        ld      de, (_spr_base)
+        add     hl, de
+        push    hl                      ; dest (blit wants it in DE)
 
         ; WIN1 = page_table[gfx_pages + (id >> 6)]
-        ld      a, (_spr_id)
+        ld      a, 1 (iy)               ; id
         rlca
         rlca
-        and     #0x03                   ; id >> 6
-        ld      c, a
+        and     #0x03
+        ld      e, a
         ld      a, (EVP_GFX_PAGES)
-        add     a, c
-        ld      l, a
-        ld      h, #0
-        ld      bc, #EVO_PAGE_TABLE
-        add     hl, bc
+        add     a, e
+        ld      e, a
+        ld      d, #0
+        ld      hl, #EVO_PAGE_TABLE
+        add     hl, de
         ld      a, (hl)
         out     (#0xA2), a
 
         ; source = #4000 + (id & 63) * 256
-        ld      a, (_spr_id)
+        ld      a, 1 (iy)               ; id
         and     #0x3F
         add     a, #0x40
         ld      h, a
         ld      l, #0
 
-        ld      de, (_spr_dest)
-        ld      a, (_spr_py)
-        call    blit_one_16x16          ; HL = source, DE = VRAM dest, A = PORT_Y
+        pop     de                      ; DE = dest
+        ld      a, b                    ; A = py (PORT_Y)
+        call    blit_one_16x16
 
-        ; record the rect so the next pass over this buffer can erase it
-        ld      hl, (_spr_xptr)
-        ld      a, (_spr_xraw)
-        ld      (hl), a
-        ld      hl, (_spr_yptr)
-        ld      a, (_spr_py)
-        ld      (hl), a
-        ld      hl, (_spr_vptr)
-        ld      (hl), #1
-
-draw_advance:
-        call    advance_saved_ptrs
-        ld      hl, (_spr_qptr)
-        inc     hl
-        inc     hl
-        inc     hl
-        inc     hl
-        ld      (_spr_qptr), hl
+draw_next:
+        ld      bc, #3
+        add     ix, bc                  ; next saved struct
+        ld      bc, #4
+        add     iy, bc                  ; next queue entry
         jp      draw_loop
 
 draw_skip:
-        ; out of range: leave saved_valid clear (already cleared by restore).
-        jr      draw_advance
+        ld      bc, #3                  ; out of range: leave valid (already 0)
+        add     ix, bc
+        ld      bc, #4
+        add     iy, bc
+        jp      draw_loop
 
 draw_done:
         ld      a, #0xC0
@@ -273,6 +261,8 @@ draw_done:
         out     (#0xE2), a
         ld      a, (_spr_win1)
         out     (#0xA2), a
+        pop     iy
+        pop     ix
         ret
 
 ; -------------------------------------------------------------------------
@@ -288,6 +278,7 @@ _sprites_restore_after_swap::
         or      a
         ret     z
         di
+        push    ix                      ; restore_saved_rects walks IX
 
         in      a, (#0xE2)
         ld      (_spr_win3), a
@@ -303,7 +294,9 @@ _sprites_restore_after_swap::
 restore_after_base_ok:
         ld      (_spr_base), hl
 
-        call    select_saved_arrays
+        call    saved_base_hl
+        push    hl
+        pop     ix                      ; IX = saved struct base
         ld      a, #VRAM_PAGE
         out     (#0xE2), a
         call    restore_saved_rects
@@ -312,68 +305,44 @@ restore_after_base_ok:
         out     (#0x89), a
         ld      a, (_spr_win3)
         out     (#0xE2), a
+        pop     ix
         ret
 
 ; -------------------------------------------------------------------------
-; select_saved_arrays: point _spr_vptr/_spr_xptr/_spr_yptr at the saved-rect
-; slice for the current back buffer (offset +64 for buffer 1).
+; saved_base_hl: HL = base of the saved-rect struct array for the current back
+; buffer (_spr_back). Buffer 1 is offset by 64 slots * 3 bytes = 192.
 ; -------------------------------------------------------------------------
-select_saved_arrays:
-        ld      hl, #_spr_saved_valid
-        ld      de, #_spr_saved_x
-        ld      bc, #_spr_saved_py
+saved_base_hl:
+        ld      hl, #_spr_saved
         ld      a, (_spr_back)
         or      a
-        jr      z, save_sel_ok
-        ld      hl, #_spr_saved_valid + 64
-        ld      de, #_spr_saved_x + 64
-        ld      bc, #_spr_saved_py + 64
-save_sel_ok:
-        ld      (_spr_vptr), hl
-        ld      (_spr_xptr), de
-        ld      (_spr_yptr), bc
+        ret     z
+        ld      hl, #_spr_saved + 192
         ret
 
-advance_saved_ptrs:
-        ld      hl, (_spr_vptr)
-        inc     hl
-        ld      (_spr_vptr), hl
-        ld      hl, (_spr_xptr)
-        inc     hl
-        ld      (_spr_xptr), hl
-        ld      hl, (_spr_yptr)
-        inc     hl
-        ld      (_spr_yptr), hl
-        ret
-
+; restore_saved_rects: IX = saved struct base. For each of 64 slots with valid=1,
+; copy its 16x16 background back from the mirror and clear valid. B = counter.
+; restore_one_16x16 preserves B and IX; _spr_base gives the buffer base.
 restore_saved_rects:
-        ld      a, #64
-        ld      (_spr_cnt), a
+        ld      b, #64
 restore_loop:
-        ld      hl, (_spr_vptr)
-        ld      a, (hl)
+        ld      a, 0 (ix)               ; valid
         or      a
         jr      z, restore_next
-        ld      (hl), #0                ; consume this saved rect
-
-        ld      hl, (_spr_yptr)
-        ld      a, (hl)
-        ld      (_spr_py), a
-
-        ld      hl, (_spr_xptr)
-        ld      a, (hl)
+        xor     a
+        ld      0 (ix), a               ; consume (valid = 0)
+        ld      a, 1 (ix)               ; x
         ld      l, a
         ld      h, #0
-        add     hl, hl                  ; x*2 (16-bit)
-        ld      bc, (_spr_base)
-        add     hl, bc                  ; HL = VRAM column
-        ld      a, (_spr_py)
+        add     hl, hl                  ; x*2
+        ld      de, (_spr_base)
+        add     hl, de                  ; HL = VRAM column
+        ld      a, 2 (ix)               ; py
         call    restore_one_16x16
 restore_next:
-        call    advance_saved_ptrs
-        ld      hl, #_spr_cnt
-        dec     (hl)
-        jr      nz, restore_loop
+        ld      de, #3
+        add     ix, de                  ; next saved struct
+        djnz    restore_loop
         ret
 
 ; -------------------------------------------------------------------------
@@ -472,32 +441,10 @@ _spr_back:
         .db     0
 _spr_base:
         .dw     0
-_spr_vptr:
-        .dw     0
-_spr_xptr:
-        .dw     0
-_spr_yptr:
-        .dw     0
-_spr_qptr:
-        .dw     0
-_spr_id:
-        .db     0
-_spr_xraw:
-        .db     0
-_spr_yraw:
-        .db     0
-_spr_py:
-        .db     0
-_spr_dest:
-        .dw     0
-_spr_cnt:
-        .db     0
-; Per-buffer saved sprite rects (buffer 0 = [0..63], buffer 1 = [64..127]).
-_spr_saved_valid:
-        .ds     128
-_spr_saved_x:
-        .ds     128
-_spr_saved_py:
-        .ds     128
+; Per-buffer saved sprite rects -- one struct per slot: { valid, x, py } (3 B).
+; Buffer 0 = slots [0..63] at +0, buffer 1 = slots [0..63] at +192. Walked with
+; IX in the draw/restore loops (queue ptr is IY, per-sprite temps are registers).
+_spr_saved:
+        .ds     384
 _sprqueue:
         .ds     256

@@ -176,52 +176,55 @@ draw_dest_x_patch:
         ld      (draw_dest_patch + 1), hl
         ld      (draw_tile_keyed_dest_patch + 1), hl
 
-        ld      hl, (_draw_src)         ; persists, advances 8 bytes/row
-        ld      a, #8
-        ld      (_draw_rows), a
+        ld      hl, (_draw_src)         ; HL = source row; persists, advances 8/row
         ret
 
+; --- Unkeyed rows: PORT_Y lives in A the whole time (LDI does not touch A), and
+;     the loop terminates when PORT_Y reaches start+8 -- no separate counter, no
+;     EXX, no per-row memory access. Main BC is free for the LDI burst. ---
 draw_tile_unkeyed_rows:
-draw_tile_row:
         ld      a, (_draw_y)
+        add     a, #8
+        ld      (draw_tile_unkeyed_end + 1), a   ; loop ends when PORT_Y == start+8
+        ld      a, (_draw_y)            ; A = PORT_Y (preserved across LDI)
+draw_tile_row:
         out     (#0x89), a
         inc     a
-        ld      (_draw_y), a
-
 draw_dest_patch:
-        ld      de, #0
-        ld      bc, #8
+        ld      de, #0                  ; dest column base (patched by setup)
+        ldi                             ; BC is scratch here (decremented, unused);
+        ldi                             ; the loop ends via the PORT_Y compare below
         ldi
         ldi
         ldi
         ldi
         ldi
         ldi
-        ldi
-        ldi
-
-        ld      a, (_draw_rows)
-        dec     a
-        ld      (_draw_rows), a
+draw_tile_unkeyed_end:
+        cp      #0                      ; patched: start + 8
         jr      nz, draw_tile_row
-
         call    end_vram_write
         ld      a, (_draw_saved_win1)   ; restore WIN1 (C code lives there)
         out     (#0xA2), a
         ret
 
+; --- Keyed rows: B = transparent key, C = PORT_Y (also the loop counter, via a
+;     compare against start+8). No per-row memory access; the inner compare/skip
+;     is the inherent cost of a runtime colour key (the asset-format #58 path is
+;     the separate, faster option). ---
 draw_tile_keyed_rows:
         ld      a, (_color_key_value)
-        ld      b, a
-draw_tile_keyed_row:
+        ld      b, a                    ; B = key
         ld      a, (_draw_y)
-        out     (#0x89), a
-        inc     a
-        ld      (_draw_y), a
-
+        ld      c, a                    ; C = PORT_Y
+        add     a, #8
+        ld      (draw_tile_keyed_end + 1), a   ; loop ends when PORT_Y == start+8
+draw_tile_keyed_row:
+        ld      a, c
+        out     (#0x89), a              ; PORT_Y
+        inc     c
 draw_tile_keyed_dest_patch:
-        ld      de, #0
-
+        ld      de, #0                  ; dest column base (patched by setup)
         ld      a, (hl)
         cp      b
         jr      z, 1$
@@ -277,12 +280,10 @@ draw_tile_keyed_dest_patch:
         ld      (de), a
 8$:
         inc     hl
-
-        ld      a, (_draw_rows)
-        dec     a
-        ld      (_draw_rows), a
+        ld      a, c
+draw_tile_keyed_end:
+        cp      #0                      ; patched: start + 8
         jr      nz, draw_tile_keyed_row
-
         call    end_vram_write
         ld      a, (_draw_saved_win1)
         out     (#0xA2), a
@@ -575,8 +576,6 @@ _draw_gfx_page:
 _draw_saved_win1:
         .db     0
 _draw_y:
-        .db     0
-_draw_rows:
         .db     0
 _draw_image_base_x:
         .db     0
