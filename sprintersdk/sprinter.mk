@@ -26,6 +26,7 @@ DSS_EXE  ?= $(SDK_DIR)tools/dss_exe.py
 MHMT     ?= $(SDK_DIR)tools/bin/mhmt
 SJASMPLUS ?= sjasmplus
 PT3_PLAYER ?= $(SDK_DIR)pt3play.asm
+AFX_PLAYER ?= $(SDK_DIR)ayfxplay.asm
 PACK_ASSETS ?= 0
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
@@ -68,8 +69,8 @@ exe: $(EXE)
 $(RESOURCES_H): $(MANIFEST) $(RESGEN)
 	$(PYTHON) $(RESGEN) $(MANIFEST) -o $@
 
-$(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) $(PT3_PLAYER) | $(BUILD)
-	SJASMPLUS="$(SJASMPLUS)" PT3_PLAYER="$(PT3_PLAYER)" $(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
+$(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) $(PT3_PLAYER) $(AFX_PLAYER) | $(BUILD)
+	SJASMPLUS="$(SJASMPLUS)" PT3_PLAYER="$(PT3_PLAYER)" AFX_PLAYER="$(AFX_PLAYER)" $(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
 
 ifeq ($(PACK_ASSETS),1)
 DSS_PACK_ARGS := --pack --mhmt $(MHMT)

@@ -44,6 +44,7 @@ RECORD_FMT = "<BBHHHII"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 DEFAULT_PT3_PLAYER = Path(__file__).resolve().parent.parent / "pt3play.asm"
+DEFAULT_AFX_PLAYER = Path(__file__).resolve().parent.parent / "ayfxplay.asm"
 
 
 @dataclass
@@ -255,6 +256,10 @@ def pt3_player_path() -> Path:
     return Path(os.environ.get("PT3_PLAYER", str(DEFAULT_PT3_PLAYER)))
 
 
+def afx_player_path() -> Path:
+    return Path(os.environ.get("AFX_PLAYER", str(DEFAULT_AFX_PLAYER)))
+
+
 def pack_music_pt3(path: Path) -> bytes:
     if not path.exists():
         raise SystemExit(f"assetpack: {path}: music file not found")
@@ -291,6 +296,52 @@ def pack_music_pt3(path: Path) -> bytes:
     if len(data) > PAGE:
         raise SystemExit(
             f"assetpack: {path}: PT3 player+module is {len(data)} bytes, exceeds 16K page"
+        )
+    return data
+
+
+def pack_soundfx_afx(path: Path) -> bytes:
+    if not path.exists():
+        raise SystemExit(f"assetpack: {path}: soundfx bank not found")
+    if path.stat().st_size == 0:
+        raise SystemExit(f"assetpack: {path}: empty soundfx bank")
+
+    player = afx_player_path()
+    if not player.exists():
+        raise SystemExit(f"assetpack: AFX player not found: {player}")
+
+    with tempfile.TemporaryDirectory(prefix="spevo-afx-") as tmp:
+        tmpdir = Path(tmp)
+        wrapper = tmpdir / "afx_image.asm"
+        output = tmpdir / "afx_image.bin"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "        device zxspectrum128",
+                    "        org #C000",
+                    "SfxStart:",
+                    "        jp SfxInit",
+                    "        jp ayfx.PLAY",
+                    "        jp ayfx.FRAME",
+                    "SfxInit:",
+                    "        ld hl,SfxBank",
+                    "        jp ayfx.INIT",
+                    f'        include "{player.resolve()}"',
+                    "SfxBank:",
+                    f'        incbin "{path.resolve()}"',
+                    "SfxEnd:",
+                    f'        savebin "{output}",SfxStart,SfxEnd-SfxStart',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run_tool([sjasmplus_path(), str(wrapper)])
+        data = output.read_bytes()
+
+    if len(data) > PAGE:
+        raise SystemExit(
+            f"assetpack: {path}: AFX player+bank is {len(data)} bytes, exceeds 16K page"
         )
     return data
 
@@ -400,7 +451,7 @@ def write_bundle(records: list[Record], output: Path) -> None:
 #      u8 pal_count;  pal_count  * { u8 page, u16 offset }
 #      u8 mus_count;  mus_count  * { u8 page, u16 offset, u16 len }
 #      u8 smp_count;  smp_count  * { u8 page, u16 offset, u16 len, u8 cbl }
-#      u8 sfx_present; [ u8 page, u16 offset, u16 len ]
+#      u8 sfx_present; [ u8 page, u16 offset, u16 len ]  ; #C000 AFX image
 #    page blobs: num_pages * 16KB, in region order gfx|spr|pal|mus|smp|sfx.
 #
 #  Access (SDK, all O(1)):
@@ -408,7 +459,8 @@ def write_bundle(records: list[Record], output: Path) -> None:
 #             page = page_table[global >> 8]; off = (global & 255) * 64.
 #    sprite:  page = page_table[gfx_pages + (id >> 6)]; off = (id & 63) * 256.
 #    palette: page = page_table[pal[id].page]; off = pal[id].offset.
-#    (mus/smp/sfx similar; samples may span pages -- player walks them.)
+#    sfx:     page = page_table[sfx.page]; entry #C000 init, #C003 play,
+#             #C006 frame. Samples may span pages -- player walks them.
 # =========================================================================
 
 PAGE = 16384
@@ -486,9 +538,7 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     sfx_items = []
     if soundfx is not None:
-        if not soundfx.exists():
-            raise SystemExit(f"assetpack: {soundfx}: soundfx bank not found")
-        sfx_items.append(soundfx.read_bytes())
+        sfx_items.append(pack_soundfx_afx(soundfx))
     sfx_base = smp_base + len(smp_blob) // PAGE
     sfx_blob, sfx_tab = pack_region(sfx_items, sfx_base)
 

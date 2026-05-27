@@ -5,7 +5,8 @@
 ;  Этап 5 status:
 ;    - sample_play: EvoSDK-compatible blocking PCM playback through Sprinter CBL.
 ;    - music_play/stop: PT3 player page image is called from the polled frame tick.
-;    - sfx_play/stop: still stubs until AFX + final IM2/CTC timing are installed.
+;    - sfx_play/stop: AFX player page image is called from the polled frame tick.
+;    - final IM2/CTC timing is still pending.
 ;
 ;  CBL facts: HW_NOTES.md §6.1 / modplay cbl.asm.
 ;    CBL_CTRL = #004E, CBL_DATA = #004F, use OUT (C),A with B=0.
@@ -34,7 +35,40 @@ CBL_DATA    = 0x004F
 CBL_IDLE    = 0x80                      ; keeps #FE.5 vsync source active
 
 _sfx_play::
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)                 ; sfx id
+        ld      (_sfx_id), a
+        inc     hl
+        ld      a, (hl)                 ; relative volume (-15..15)
+        ld      (_sfx_vol), a
+
+        call    sfx_record              ; HL -> sfx record, carry if absent
+        ret     c
+
+        ld      a, (hl)                 ; logical page with #C000 AFX image
+        call    logical_to_phys_a
+        ld      (_sfx_phys_page), a
+
+        ld      a, (_sfx_initialized)
+        or      a
+        jr      nz, 1$
+        call    sfx_call_init
+        ld      a, #1
+        ld      (_sfx_initialized), a
+1$:
+        ld      a, #1
+        ld      (_sfx_active), a
+        jp      sfx_call_play
+
 _sfx_stop::
+        ld      a, (_sfx_initialized)
+        or      a
+        jr      z, 1$
+        call    sfx_call_init           ; AFX INIT marks all channels empty
+1$:
+        xor     a
+        ld      (_sfx_active), a
         ret
 
 _music_play::
@@ -233,6 +267,37 @@ music_record_missing:
         scf
         ret
 
+sfx_record:
+        ld      a, (EVO_META_IMGCNT)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl
+        add     hl, hl                  ; img_count*4
+        ld      de, #EVO_IMG_TABLE
+        add     hl, de                  ; -> pal_count
+
+        ld      a, (hl)
+        inc     hl
+        call    skip_a_times_3          ; -> mus_count
+
+        ld      a, (hl)
+        inc     hl
+        call    skip_a_times_5          ; -> smp_count
+
+        ld      a, (hl)
+        inc     hl
+        call    skip_a_times_6          ; -> sfx_present
+
+        ld      a, (hl)
+        or      a
+        jr      z, sfx_record_missing
+        inc     hl                      ; -> sfx record {page,off,len}
+        or      a
+        ret
+sfx_record_missing:
+        scf
+        ret
+
 skip_a_times_3:
         ld      e, a
         ld      d, #0
@@ -244,6 +309,17 @@ skip_a_times_3:
 skip_a_times_5:
         ld      e, a
         ld      d, #0
+        add     hl, de
+        add     hl, de
+        add     hl, de
+        add     hl, de
+        add     hl, de
+        ret
+
+skip_a_times_6:
+        ld      e, a
+        ld      d, #0
+        add     hl, de
         add     hl, de
         add     hl, de
         add     hl, de
@@ -374,8 +450,13 @@ silence_done:
 _sound_tick::
         ld      a, (_music_active)
         or      a
+        jr      z, 1$
+        call    music_call_play
+1$:
+        ld      a, (_sfx_active)
+        or      a
         ret     z
-        jp      music_call_play
+        jp      sfx_call_frame
 
 music_call_init:
         ld      hl, #0xC000
@@ -406,12 +487,71 @@ music_call_hl:
 music_do_call:
         jp      (hl)
 
+sfx_call_init:
+        ld      hl, #0xC000
+        jr      sfx_call_hl
+
+sfx_call_play:
+        ld      hl, #0xC003
+        jr      sfx_call_hl_with_args
+
+sfx_call_frame:
+        ld      hl, #0xC006
+
+sfx_call_hl:
+        di
+        in      a, (#SLOT3)
+        ld      (_sfx_saved_win3), a
+        ld      a, (_sfx_phys_page)
+        out     (#SLOT3), a
+        push    ix
+        push    iy
+        call    sfx_do_call
+        pop     iy
+        pop     ix
+        ld      a, (_sfx_saved_win3)
+        out     (#SLOT3), a
+        ret
+
+sfx_call_hl_with_args:
+        di
+        in      a, (#SLOT3)
+        ld      (_sfx_saved_win3), a
+        ld      a, (_sfx_phys_page)
+        out     (#SLOT3), a
+        push    ix
+        push    iy
+        ld      a, (_sfx_vol)
+        ld      c, a
+        ld      a, (_sfx_id)
+        call    sfx_do_call
+        pop     iy
+        pop     ix
+        ld      a, (_sfx_saved_win3)
+        out     (#SLOT3), a
+        ret
+
+sfx_do_call:
+        jp      (hl)
+
         .area   _SDKDATA
 _music_active:
         .db     0
 _music_phys_page:
         .db     0
 _music_saved_win3:
+        .db     0
+_sfx_id:
+        .db     0
+_sfx_vol:
+        .db     0
+_sfx_active:
+        .db     0
+_sfx_initialized:
+        .db     0
+_sfx_phys_page:
+        .db     0
+_sfx_saved_win3:
         .db     0
 _cbl_logical_page:
         .db     0
