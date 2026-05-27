@@ -35,6 +35,7 @@
         .globl  _vram_base              ; back buffer base (#C000/#C140), set by begin_vram_write
         .globl  _sprites_render_before_swap
         .globl  _sprites_restore_after_swap
+        .globl  _sound_tick
         .globl  _sync_tiles_to_shadow   ; from lib_tiles (dual-buffer tile sync)
         .globl  _tiles_clear_dirty      ; from lib_tiles
 
@@ -267,6 +268,7 @@ _delay::
         ret
 
 inc_time_counter:
+        call    _sound_tick
         ld      hl, #_time_counter
         inc     (hl)
         ret     nz

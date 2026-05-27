@@ -15,8 +15,11 @@ and the original makeresh.exe.
 from __future__ import annotations
 
 import argparse
+import os
 import struct
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +43,7 @@ HEADER_FMT = "<IHHI4x"
 RECORD_FMT = "<BBHHHII"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
+DEFAULT_PT3_PLAYER = Path(__file__).resolve().parent.parent / "pt3play.asm"
 
 
 @dataclass
@@ -235,6 +239,62 @@ def cbl_ctrl_for_rate(rate: int) -> int:
     return 0xDB
 
 
+def run_tool(args: list[str]) -> None:
+    try:
+        subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as exc:
+        output = exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
+        raise SystemExit(f"assetpack: tool failed: {' '.join(args)}\n{output}") from exc
+
+
+def sjasmplus_path() -> str:
+    return os.environ.get("SJASMPLUS", "sjasmplus")
+
+
+def pt3_player_path() -> Path:
+    return Path(os.environ.get("PT3_PLAYER", str(DEFAULT_PT3_PLAYER)))
+
+
+def pack_music_pt3(path: Path) -> bytes:
+    if not path.exists():
+        raise SystemExit(f"assetpack: {path}: music file not found")
+    if path.stat().st_size == 0:
+        raise SystemExit(f"assetpack: {path}: empty music file")
+
+    player = pt3_player_path()
+    if not player.exists():
+        raise SystemExit(f"assetpack: PT3 player not found: {player}")
+
+    with tempfile.TemporaryDirectory(prefix="spevo-pt3-") as tmp:
+        tmpdir = Path(tmp)
+        wrapper = tmpdir / "pt3_image.asm"
+        output = tmpdir / "pt3_image.bin"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "        device zxspectrum128",
+                    "        org #C000",
+                    "PlayerStart:",
+                    f'        include "{player.resolve()}"',
+                    "MusicModule:",
+                    f'        incbin "{path.resolve()}"',
+                    "PlayerEnd:",
+                    f'        savebin "{output}",PlayerStart,PlayerEnd-PlayerStart',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run_tool([sjasmplus_path(), str(wrapper)])
+        data = output.read_bytes()
+
+    if len(data) > PAGE:
+        raise SystemExit(
+            f"assetpack: {path}: PT3 player+module is {len(data)} bytes, exceeds 16K page"
+        )
+    return data
+
+
 def make_records(manifest: Path) -> list[Record]:
     entries, soundfx = parse_compile_bat(manifest)
     records: list[Record] = []
@@ -394,10 +454,12 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     # --- palettes / music / samples / sfx: packed, never split an entry
     #     across a page boundary (so page+offset addressing is exact) ---
-    def pack_region(items, base_page):
+    def pack_region(items, base_page, *, align_each=False):
         blob = bytearray()
         table = []
         for data in items:
+            if align_each and len(blob) % PAGE:
+                _pad_to_page(blob)
             if len(blob) % PAGE + len(data) > PAGE and len(data) <= PAGE:
                 _pad_to_page(blob)
             table.append((base_page + len(blob) // PAGE, len(blob) % PAGE, len(data)))
@@ -410,11 +472,9 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     mus_items = []
     for _v, path in entries["music"]:
-        if not path.exists():
-            raise SystemExit(f"assetpack: {path}: music file not found")
-        mus_items.append(path.read_bytes())
+        mus_items.append(pack_music_pt3(path))
     mus_base = spr_base + len(spr) // PAGE + len(pal_blob) // PAGE
-    mus_blob, mus_tab = pack_region(mus_items, mus_base)
+    mus_blob, mus_tab = pack_region(mus_items, mus_base, align_each=True)
 
     smp_items, smp_cbl = [], []
     for _v, path in entries["sample"]:

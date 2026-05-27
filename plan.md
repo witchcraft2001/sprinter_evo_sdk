@@ -136,7 +136,7 @@
       экспортируются из `lib_startup`. Собираются отдельными `.rel` и линкуются (вместо
       `INCLUDE`, как в EvoSDK — адаптация под раздельную компиляцию). Сборка обоих проектов
       проверена: межфайловые символы резолвятся, дублей нет.
-- 🟦 `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
+- ✅ `sprintersdk/loader.asm` + расширить `dss_exe.py` до **монолитного EXE с первичным
       загрузчиком** (`LOADER`@8, PRELOAD; референс `kode/KodeEXE.asm`, см. `HW_NOTES.md`
       §9.1): DSS грузит loader, тот берёт FM из `PSP[IX-3]`, `BIOS.GetMem` страницы,
       последовательно `Dss.Read`+`DePACK` (HRUST `.hst` от `pack_spk`) блобы тела →
@@ -284,14 +284,14 @@ Sprinter** (чёрный экран, не падает, отрабатывает
 
 ## Этап 3. Графика: палитра, тайлы, изображения 🟦
 
-- 🟦 `lib_startup.asm` (палитра): `pal_clear/bright/select/copy/col/custom` — конвертация
+- ✅ `lib_startup.asm` (палитра): `pal_clear/bright/select/copy/col/custom` — конвертация
       RGB222→формат палитры Sprinter, применение яркости. Референс приёма — `evosdk_libs`.
       → Реализованы asm-пути `pal_clear`, `pal_bright`, `pal_col`, `pal_custom` и
       временный `pal_copy` текущей 16-цветной палитры. Вывод идёт напрямую через
       подтверждённый протокол `WIN3=#50`, `PORT_Y=index`, `#C3E0/#C3E1/#C3E2=RGB6<<2`;
-      яркость 0..6: 0=чёрный, 3=нормальный RGB222, 6=белый. `pal_select(id)` ждёт
-      runtime asset table/loader, чтобы брать предопределённые PAL из `EVOS`.
-- ⬜ `lib_tiles.asm`: `select_image`, `draw_tile`, `draw_tile_key`, `draw_image`,
+      яркость 0..6: 0=чёрный, 3=нормальный RGB222, 6=белый. `pal_select(id)` и
+      `pal_copy(id)` берут предопределённые PAL из EVP1 runtime metadata.
+- ✅ `lib_tiles.asm`: `select_image`, `draw_tile`, `draw_tile_key`, `draw_image`,
       `clear_screen` — вывод в VRAM. **Горячие циклы — в SRAM-кэш (WIN0).**
       `clear_screen`/крупные блиты — через **accel** (блоки >12 байт).
       → Начат перенос: `clear_screen(color)` реализован в asm через Sprinter accel
@@ -299,17 +299,16 @@ Sprinter** (чёрный экран, не падает, отрабатывает
       (`RGMOD^1`) через `WIN3=#50`, base `#C000/#C140`, `PORT_Y=0..255`, затем возвращает `PORT_Y=#C0` и
       восстанавливает WIN3. Runtime init очищает оба буфера A/B в чёрный после установки
       видеорежима для обеих страниц.
-      → Добавлен runtime-доступ к `EVOS` assets для low-loader EXE: `dss_exe.py` патчит
-      `_evos_assets_ptr/_evos_assets_len` по `.map`; `pal_select/pal_copy` читают PAL-записи,
-      `select_image` читает IMG-запись, `draw_tile` рисует 8×8 в теневой буфер развёрнутыми
-      `LDI` (без accel, 8 Б < порога), `draw_image` выводит изображение row-major через
-      `draw_tile`. `draw_tile_key` пока использует unkeyed-путь до флага `color_key.N/#58`.
+      → Реализован runtime-доступ к EVP1 assets: `select_image` читает IMG-запись,
+      `draw_tile` рисует 8×8 в back buffer развёрнутыми `LDI` (без accel, 8 Б < порога),
+      `draw_image` выводит изображение tile-major как в EvoSDK. `draw_tile_key` закрыт
+      корректным software compare/skip по текущему `color_key()`.
       - ⬜ **TODO: переписать очистку экрана через accel вертикальную заливку (`LD E,E`)**
         вместо горизонтальной (`LD C,C`). Сейчас: 256× `PORT_Y` + 512 пульсов (2×160/строку).
         Вертикальная заливка (`#5B`-режим accel, см. `HW_NOTES.md` §4) должна закрывать
         столбцы за проход — меньше переключений `PORT_Y`/пульсов → быстрее clear. Сверить
         точную семантику `LD E,E`/шаг на железе/в рабочем коде.
-- ⬜ `draw_tile_key` — **аппаратные keyed-тайлы через `#58`** (теперь подтверждён, §7.1):
+- 🟦 `draw_tile_key` — **аппаратные keyed-тайлы через `#58`** (теперь подтверждён, §7.1):
       манифест `set color_key.N=K` → `assetpack` ремапит `K→0xFF` + флаг `hw_keyed`;
       рантайм рисует через `WIN3=#58` тем же быстрым `LDI`-burst (~6× быстрее, зеркало
       обновляется). Готовый референс — git-stash `HW-keyed 0x58 experiment` в `evosdk_libs`
@@ -320,7 +319,11 @@ Sprinter** (чёрный экран, не падает, отрабатывает
       back buffer. Это закрывает корректность существующих игр (`game_xnx` и др.), где ключ
       задаётся вызовом `color_key()` в рантайме. Fast path `color_key.N → 0xFF/#58` остаётся
       отдельной оптимизацией формата ассетов.
-- ⬜ Двойная буферизация: `swap_screen` + теневой экран, `vsync` автоматический.
+- ✅ Двойная буферизация: `swap_screen` + теневой экран, `vsync` автоматический.
+      → Реализовано через `RGMOD.0`, back buffer `#C000/#C140`, настоящий polling-vsync
+      по `#FFFE/#FE.5` с CBL idle arm. Для спрайтов добавлен post-swap restore старого
+      visible buffer из hardware mirror, чтобы после `sprites_stop()` не оставались хвосты
+      в одном из буферов.
 
 **Критерий выхода:** `example_slideshow` и тайловый вывод `game_xnx` (титул, шрифты,
 фоны) выглядят идентично Evo-версии; скорость не хуже оригинала (замер на эмуляторе).
@@ -329,26 +332,34 @@ Sprinter** (чёрный экран, не падает, отрабатывает
 
 ## Этап 4. Спрайты 🟦
 
-- 🟦 `lib_sprites.asm`: `set_sprite`, `sprites_start/stop`, очередь `_sprqueue` (4 байта:
+- ✅ `lib_sprites.asm`: `set_sprite`, `sprites_start/stop`, очередь `_sprqueue` (4 байта:
       idh,idl,y,x; `idh=255` — конец), две очереди под двойной буфер, до 64 спрайтов 16×16,
       без клиппинга — паритет контракта с `evosdk/`.
-      → M2b baseline: одна EvoSDK-очередь 64×4, `set_sprite` совместим с ABI (`SPRITE_END`
-      = `idh #FF`), `sprites_start` копирует видимый чистый фон в hidden; `swap_screen`
-      вызывает `_sprites_render_before_swap`.
-- 🟦 Авто-восстановление фона под спрайтами. Где подтверждено — через **теневую VRAM**.
-      → Baseline без следов: перед рендером спрайтов чистый hidden background копируется
-      в текущий visible, затем спрайты рисуются в hidden и только потом происходит flip.
-      Это корректно, но медленнее финального пути (копия 320×200 каждый кадр).
-- 🟦 **Аппаратная прозрачность** спрайтов.
-      → В baseline пока программная прозрачность по `0xFF` (так `assetpack` уже помечает
-      прозрачные пиксели спрайтов). Источник спрайта: `page_table[gfx_pages+(id>>6)]`,
-      `off=(id&63)*256`; координата X масштабируется `x*2`, Y центрируется `+28`.
-- ⬜ **Совмещённый режим «прозрачность + теневая VRAM» — АППАРАТНО** (VRAM `#58–#5B`):
+      → Реализовано: одна EvoSDK-очередь 64×4, `set_sprite` совместим с ABI (`SPRITE_END`
+      = `idh #FF`), per-buffer saved-rect списки для восстановления, `sprites_start`
+      праймит hidden buffer и зеркала; `swap_screen` вызывает render-before-flip и
+      restore-after-flip.
+- ✅ Авто-восстановление фона под спрайтами. Где подтверждено — через **теневую VRAM**.
+      → Реализовано через hardware mirror: фон пишется через `#50`, спрайты через
+      VRAM-only transparent page, восстановление = same-address accel copy mirror→VRAM
+      только по сохранённым rect.
+- ✅ **Аппаратная прозрачность** спрайтов.
+      → Реализовано через `#5C` (`#50 | transparent | VRAM-only`), прозрачный байт `0xFF`.
+      Источник спрайта: `page_table[gfx_pages+(id>>6)]`, `off=(id&63)*256`; координата
+      X масштабируется `x*2`, Y центрируется `+28`.
+- ✅ **Совмещённый режим «прозрачность + теневая VRAM» — АППАРАТНО** (VRAM `#58–#5B`):
       **подтверждён на реальном железе** (прежняя «неработоспособность» — баг MAME).
-      Блокер снят (`CLAUDE.md` §7.1): реализуем аппаратный путь, без софтверного фолбэка.
+      Блокер снят (`CLAUDE.md` §7.1): реализован аппаратный путь, без софтверного фолбэка.
       ⚠️ MAME может врать для `#58–#5B` — проверять на железе/исправленном MAME.
 - ⬜ Переключатель **скорость/объём**: развёрнутые vs компактные циклы вывода спрайтов
       (compile-time, напр. `-DUNROLL_SPRITES`).
+- ⬜ **TODO (оптимизация, отложено до завершения основного функционала):**
+      `_sync_tiles_to_shadow` (lib_tiles) ещё держит ~10 scratch-байт (`_sync_ty`,
+      `_sync_basex`, `_sync_x`, `_sync_vis_base`, `_sync_dst_base`, `_sync_dst`,
+      `_sync_saved_win3`) и пересчитывает `x*8` дважды на ячейку. Перевести обход
+      dirty-карты и `sync_one_cell` на регистры/`EXX` (как сделано для тайловых циклов
+      и спрайтового `draw_loop`): держать vis/dst-базы и координаты ячейки в регистрах,
+      убрать scratch-RAM. Не per-pixel hot (раз/кадр), поэтому отложено.
 
 **Критерий выхода:** `example_sprites` и спрайты `game_xnx` (игрок, шары) выводятся
 корректно с прозрачностью и восстановлением фона; счётчик активных спрайтов и скорость
@@ -356,15 +367,28 @@ Sprinter** (чёрный экран, не падает, отрабатывает
 
 ---
 
-## Этап 5. Звук ⬜
+## Этап 5. Звук 🟦
 
-- ⬜ `lib_sound.asm` + `pt3play.asm`/`ayfxplay.asm` + `lib_sndpage.asm`: `music_play/stop`,
+- 🟦 `lib_sound.asm` + `pt3play.asm`/`ayfxplay.asm` + `lib_sndpage.asm`: `music_play/stop`,
       `sfx_play/stop` — кадры музыки/звуков в IM2-обработчике.
+      → Добавлен промежуточный PT3-путь: `assetpack.py` собирает page-local образ
+      `pt3play.asm + *.pt3` через `sjasmplus`, кладёт каждый модуль с выравниванием
+      на 16-КБ logical page, `music_play(id)` мапит страницу в WIN3 и вызывает entry
+      `#C000`, `_sound_tick` вызывает `#C005` из поллингового `_vsync`, `music_stop()`
+      вызывает mute `#C008`. Это проверяет упаковку/маппинг/entry points, но ещё не
+      закрывает финальный CTC/IM2-тайминг и не реализует AFX.
 - ⬜ **CTC** для гарантированных прерываний → стабильный тайминг **проигрывания
       PT3-модулей** (приём из `evosdk_libs`).
-- ⬜ `sample_play` через **CBL** (референс — `sources/modplay`); синхронизация — через
+- ✅ `sample_play` через **CBL** (референс — `sources/modplay`); синхронизация — через
       **вектор прерывания CBL либо проверку буфера по порту `#FE`** (НЕ через CTC).
       Семантика как в оригинале (на время проигрывания программа ждёт).
+      → Реализован первый звук-вход: `sample_play(sample)` в `sprintersdk/lib_sound.asm`.
+      EVP1 sample-record `{logical_page,off,len,cbl}` читается напрямую из SRAM-meta,
+      logical pages резолвятся через loader-filled `EVO_PAGE_TABLE`; поток идёт через
+      CBL FIFO (`#004E/#004F`) с DI и polling `#FE.bit7`, без CTC. На выходе CBL оставляется
+      в idle `#80`, чтобы `vsync` продолжал видеть `#FE.5`. Добавлена поддержка sample,
+      пересекающих 16-КБ logical pages (важно для `game_xnx`: `SMP_MEOW` > 16К).
+      AFX остаётся заглушкой до IM2/CTC; PT3 включён промежуточно через `_vsync`.
 
 **Критерий выхода:** музыка/звуки/сэмплы `game_xnx` играют без сбоев тайминга; ничего не
 заикается под нагрузкой рендера.
