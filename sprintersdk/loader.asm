@@ -29,7 +29,7 @@
 ;       place -- exactly like sdcc-sprinter-sdk asset_load_pages.c. No temp
 ;       page, no cross-window depack. chunk0 -> SRAM(hot), 1->WIN1,2->WIN2,3->WIN3.
 ;    5. Read EVP1 metadata + M asset pages; record asset pages in the table.
-;    6. Write the SDK tables (page table #1A00, saved vmode #1A40) into chunk0
+;    6. Write the SDK tables (page table #1A00, saved vmode #1AC8) into chunk0
 ;       via the WIN1 staging view (#4000+offset), before chunk0 is LDIR'd.
 ;    7. CACHE on (OUT #8F,0 / IN #FB); LDIR chunk0 (mapped to WIN1) into WIN0
 ;       SRAM at #0000. Map WIN1=chunk1, WIN3=chunk3 (the loader can't map its
@@ -74,7 +74,7 @@ l_hot       =       0xBC08          ; word: bytes of chunk0 to copy into SRAM
 l_entry     =       0xBC0A          ; word: game entry
 l_page_tmp  =       0xBC0C          ; scratch: destination page being loaded
 l_pages     =       0xBC10          ; 4 bytes: code chunk physical pages
-l_assets    =       0xBC20          ; up to 64 bytes: asset physical pages
+l_assets    =       0xBC20          ; up to 200 bytes: asset physical pages (-> #BCE7, below SP #BFFF)
 l_hdr       =       0xBC80          ; 16-byte mini-header read buffer
 l_sizes     =       0xBCA0          ; up to 68 words: packed payload sizes
 l_hrust_sp  =       0xBD40          ; saved loader SP while HRUST uses SP as input
@@ -87,8 +87,8 @@ MINI_FLAG_PACKED =  0x01
 ;      #E000-#FFFF). The loader writes them into chunk0 (which it then LDIRs into
 ;      SRAM) through the WIN1 staging view: while chunk0 is mapped to WIN1, its
 ;      offset X is reachable at #4000+X. MUST match lib_startup.asm/lib_tiles.asm.
-EVO_PAGE_TABLE   = 0x1A00           ; SRAM: asset phys page table (index=logical)
-EVO_SAVED_VMODE  = 0x1A40           ; SRAM: original DSS video mode (for exit)
+EVO_PAGE_TABLE   = 0x1A00           ; SRAM: asset phys page table, 200 entries (#1A00-#1AC7)
+EVO_SAVED_VMODE  = 0x1AC8           ; SRAM: original DSS video mode (for exit)
 EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE

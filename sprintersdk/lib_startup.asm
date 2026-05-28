@@ -44,8 +44,8 @@
 ; ---- SDK runtime region in SRAM (#0000-#1FFF, mirror of EvoSDK #E000-#FFFF).
 ;      Loader fills the tables into chunk0 before LDIR'ing it into SRAM. These
 ;      EQUs MUST match loader.asm and lib_tiles.asm. ----
-EVO_PAGE_TABLE  = 0x1A00         ; asset phys page table (64 B), loader-filled
-EVO_SAVED_VMODE = 0x1A40         ; original DSS video mode (for exit), loader-filled
+EVO_PAGE_TABLE  = 0x1A00         ; asset phys page table (200 B, #1A00-#1AC7), loader-filled
+EVO_SAVED_VMODE = 0x1AC8         ; original DSS video mode (for exit), loader-filled
 EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
 
 ; The exit trampoline must execute with CACHE off (WIN0 = DSS BIOS, so SRAM is
@@ -692,7 +692,7 @@ pal_bright_table:
 
         .area   _SDKDATA
         ; SDK mutable data, in the SRAM region (#1600). Saved video mode for the
-        ; exit trampoline lives in SRAM #1A40 (loader-filled), read by the
+        ; exit trampoline lives in SRAM #1AC8 (loader-filled), read by the
         ; shutdown launcher before CACHE off.
 _screen_active:
         .db     0

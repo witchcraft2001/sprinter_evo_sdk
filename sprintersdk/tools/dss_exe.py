@@ -33,12 +33,13 @@ MINIHDR_MAGIC = ord("L")
 MINIHDR_FLAG_PACKED = 0x01
 EVP_MAGIC = b"EVP1"
 EVP_HEADER_SIZE = 16
-# SDK SRAM table region (loader.asm EVO_*): #1A00 page table / #1A40 vmode /
-# #1B00 EVP1 meta, up to the stack at #2000. SDK code+data must stay below it
-# and C must start at/after #2400 -- so #1A00..#23FF must be empty in the image.
+# SDK SRAM table region (loader.asm EVO_*): #1A00 page table (200 B, #1A00-#1AC7) /
+# #1AC8 vmode / #1B00 EVP1 meta, up to the stack at #2000. SDK code+data must stay
+# below it and C must start at/after #2400 -- so #1A00..#23FF must be empty in the image.
 EVO_TABLE_REGION = 0x1A00
 EVO_TABLE_END = 0x2400              # exclusive (covers tables + the 1 KB stack)
 EVO_META_MAX = 0x400               # #1B00..#1EFF
+MAX_ASSET_PAGES = 200              # page_table capacity (#1A00-#1AC7); 200*16K = 3.2 MB
 
 
 def parse_ihx(path: Path) -> dict[int, int]:
@@ -105,6 +106,26 @@ def parse_map_symbols(path: Path) -> dict[str, int]:
             except ValueError:
                 continue
     return symbols
+
+
+def map_image_top(path: Path) -> tuple[str, int]:
+    """Highest byte address (exclusive end) occupied by any linker area.
+
+    Returns (area_name, end_addr). The IHX holds only emitted bytes, so it
+    hides a BSS/_DATA area that spills past #FFFF; this reads the .map areas
+    (`<name> <addr_hex> <size_hex> = <dec>. bytes (attrs)`) to catch it.
+    """
+    top_name, top_end = "", 0
+    for line in path.read_text(encoding="ascii", errors="ignore").splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[3] == "=":
+            try:
+                end = int(parts[1], 16) + int(parts[2], 16)
+            except ValueError:
+                continue
+            if end > top_end:
+                top_name, top_end = parts[0], end
+    return top_name, top_end
 
 
 def patch_u16(image: bytearray, load: int, address: int, value: int, name: str) -> None:
@@ -306,8 +327,10 @@ def build_monoblock(
         )
 
     m = len(data_pages)
-    if m > 64:
-        raise SystemExit(f"dss_exe: {m} asset pages exceed the 64-entry page table")
+    if m > MAX_ASSET_PAGES:
+        raise SystemExit(
+            f"dss_exe: {m} asset pages exceed the {MAX_ASSET_PAGES}-entry page table"
+        )
     if len(meta_blob) > EVO_META_MAX:
         raise SystemExit(
             f"dss_exe: EVP1 meta {len(meta_blob)} B exceeds the 0x{EVO_META_MAX:X} "
@@ -391,6 +414,15 @@ def main(argv: list[str]) -> int:
     if args.monoblock:
         if not args.loader:
             raise SystemExit("dss_exe: --monoblock requires --loader <loader.bin>")
+        if args.map:
+            area, end = map_image_top(args.map)
+            if end > 0x10000:
+                raise SystemExit(
+                    f"dss_exe: linker area {area} ends at 0x{end:05X}, past the 64K "
+                    f"address ceiling 0x10000 (overflow {end - 0x10000} B). C code+data "
+                    f"exceeds the #2400-#FFFF budget -- reduce code or wait for Phase 2 "
+                    f"(SDCC 4.5.0). The IHX alone hides this (BSS is not emitted)."
+                )
         code = image_from_zero(parse_ihx(args.input))
         loader = args.loader.read_bytes()
         assets = args.assets.read_bytes() if args.assets else b""

@@ -51,7 +51,7 @@ CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 # crt0 должен идти первым в линковке (=> _entry на code-loc).
 # SDCC 2.9.0 z80 runtime-хелперы (* / % , long, сдвиги): прямой sdldz80 НЕ
 # подтягивает z80-lib SDCC, поэтому линкуем их явно (historical SDCC runtime).
-SDCC290_RTL := compat div divsigned divulong mod modulong mul mullong shift
+SDCC290_RTL := compat div divsigned divulong mod modulong mul mullong shift rle
 RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
 # SDK libraries by EvoSDK responsibility zone (mirror of evosdk/ file names).
 SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound
@@ -100,7 +100,8 @@ $(LOADER_BIN): $(BUILD)/loader.rel
 # hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
 $(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP)
 	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
-	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) $(DSS_PACK_ARGS)
+	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) \
+	    --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS)
 
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)
