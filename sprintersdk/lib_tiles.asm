@@ -515,24 +515,21 @@ sync_byte_next:
 ; sync_one_cell: copy the 8x8 cell at (_sync_x, _sync_ty) from the visible
 ;   buffer (mirror) to the hidden buffer via the accelerator. WIN3 = #50.
 sync_one_cell:
-        ld      a, (_sync_x)            ; x*8 (16-bit)
+        ld      a, (_sync_x)            ; HL = x*8 (16-bit), computed ONCE
         ld      l, a
         ld      h, #0
         add     hl, hl
         add     hl, hl
         add     hl, hl
+        ld      b, h
+        ld      c, l                    ; BC = x*8 (scratch; B/C reloaded below)
         ld      de, (_sync_dst_base)
-        add     hl, de
-        ld      (_sync_dst), hl         ; dst column = hidden base + x*8
-        ld      a, (_sync_x)
-        ld      l, a
-        ld      h, #0
-        add     hl, hl
-        add     hl, hl
-        add     hl, hl
-        ld      de, (_sync_vis_base)
-        add     hl, de                  ; HL = src column = visible base + x*8
-        ld      de, (_sync_dst)         ; DE = dst column
+        add     hl, de                  ; HL = dst column = hidden base + x*8
+        ex      de, hl                  ; DE = dst column
+        ld      h, b
+        ld      l, c                    ; HL = x*8
+        ld      bc, (_sync_vis_base)
+        add     hl, bc                  ; HL = src column = visible base + x*8
         ld      a, (_sync_ty)           ; PORT_Y = ty*8 + 28
         add     a, a
         add     a, a
@@ -568,8 +565,6 @@ _sync_x:
 _sync_vis_base:
         .dw     0
 _sync_dst_base:
-        .dw     0
-_sync_dst:
         .dw     0
 _tile_dirty:
         .ds     TILE_DIRTY_ROWS * TILE_DIRTY_STRIDE

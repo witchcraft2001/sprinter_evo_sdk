@@ -59,6 +59,7 @@ DSS_GETMEM  =       0x3D
 DSS_SETVMOD =       0x50
 DSS_GETVMOD =       0x51
 DSS_EXIT    =       0x41
+DSS_PUTCHAR =       0x5B            ; print char in A to the DSS console (text mode)
 
 VIDEO_MODE  =       0x81            ; 320x256x8bpp
 
@@ -157,6 +158,12 @@ _loader_entry::
         pop     ix
 no_packed_table:
 
+        ; Show a "loading" message while the screen is still in DSS text mode
+        ; (video #81 is set only in step 6b). Each loaded page prints a '.', so
+        ; a slow disk read clearly shows progress instead of looking hung.
+        ld      hl, #msg_loading
+        call    puts
+
         ; --- 4. load K code chunks (each: GetMem -> WIN1 -> read 16K) ---
         ld      b, #0                   ; chunk index
 load_code_loop:
@@ -187,6 +194,8 @@ load_code_raw:
         call    read_16k_win1
 load_code_next:
         pop     bc
+        ld      a, #0x2E                ; progress dot per loaded page ('.')
+        call    putc
         inc     b
         jr      load_code_loop
 load_code_done:
@@ -239,6 +248,8 @@ load_asset_raw:
         call    read_16k_win1
 load_asset_next:
         pop     bc
+        ld      a, #0x2E                ; progress dot per loaded page ('.')
+        call    putc
         inc     b
         jr      asset_loop
 asset_done:
@@ -300,6 +311,42 @@ no_win3:
         jp      (hl)
 
 ; -------------------------------------------------------------------------
+; putc: print the char in A to the DSS console (text mode). Preserves every
+;   register the load loops rely on (BC carries the page counter, HL/DE the
+;   staging pointers), so it is safe to call from inside the loops.
+putc:
+        push    bc
+        push    de
+        push    hl
+        push    ix
+        ld      c, #DSS_PUTCHAR         ; A = char
+        rst     #0x10
+        pop     ix
+        pop     hl
+        pop     de
+        pop     bc
+        ret
+
+; puts: print the null-terminated string at HL. Clobbers A (HL preserved by
+;   putc, advanced here). Used for the "loading" banner.
+puts:
+        ld      a, (hl)
+        or      a
+        ret     z
+        call    putc
+        inc     hl
+        jr      puts
+
+msg_loading:
+        .ascii  "Loading"
+        .db     0
+
+msg_nomem:
+        .db     0x0D, 0x0A
+        .ascii  "Out of memory!"
+        .db     0x0D, 0x0A, 0
+
+; -------------------------------------------------------------------------
 ; getmem_page: DSS GetMem 1 page -> A = physical page. On error, halts
 ;   (no graceful path yet; the EXE is sized so allocation should succeed).
 getmem_page:
@@ -308,9 +355,18 @@ getmem_page:
         ld      c, #DSS_GETMEM
         rst     #0x10
         pop     ix
-        ret     nc
+        ret     nc                      ; success: A = physical page
+        ; --- Out of memory: the EXE needs more free pages than DSS has. We are
+        ; still in DSS text mode (video is switched only in step 6b) and CACHE is
+        ; off, so report it and return to DSS with a non-zero code instead of
+        ; hanging. DSS frees this process's pages on Exit. ---
+        ld      hl, #msg_nomem
+        call    puts
+        ld      b, #0xFF                ; non-zero exit code = error
+        ld      c, #DSS_EXIT
+        rst     #0x10                   ; DSS.Exit -- does not return
         di
-        halt                            ; out of memory (TODO: clean Dss.Exit)
+        halt                            ; safety net only if Exit ever returns
 
 ; read_16k_win1: Dss.Read 0x4000 bytes from FM into #4000 (WIN1).
 read_16k_win1:

@@ -75,9 +75,21 @@ _evo_runtime_init::
         ld      (_screen_active), a
         call    clear_both_buffers_black   ; runs DI (IM2 not yet enabled)
         call    _pal_clear
-        ; Arm CBL idle ONCE so #FE.5 (frame source) keeps toggling; _vsync polls
-        ; it for the FRAME (tear-free, no IM2 dependence).
-        ld      bc, #0x004E
+        ; CBL: the 256-byte FIFO can hold power-on garbage that plays as noise.
+        ; Flush it with silence BEFORE arming, exactly like modplay
+        ; InitCBL_PathA (cbl.asm): off -> flush 256 x 0x80 -> on. Then the idle
+        ; arm keeps #FE.5 (frame source) toggling so _vsync polls it for the
+        ; FRAME (tear-free, no IM2 dependence). Whole block is DI (we are pre-EI).
+        ld      bc, #0x004E             ; CBL off
+        xor     a
+        out     (c), a
+        ld      bc, #0x004F             ; flush FIFO: 256 x 0x80 (DAC centre)
+        ld      a, #0x80
+        ld      b, #0                   ; djnz from 0 = 256 (FIFO decodes C=#4F)
+1$:
+        out     (c), a
+        djnz    1$
+        ld      bc, #0x004E             ; CBL on (idle arm)
         ld      a, #0x80
         out     (c), a
         call    im2_sound_setup        ; CTC 50Hz IM2 -> _sound_tick + _time; EI
