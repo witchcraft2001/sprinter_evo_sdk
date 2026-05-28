@@ -59,7 +59,9 @@ _sfx_play::
 1$:
         ld      a, #1
         ld      (_sfx_active), a
-        jp      sfx_call_play
+        call    sfx_call_play
+        ei                              ; restore IM2 (call paths run DI)
+        ret
 
 _sfx_stop::
         ld      a, (_sfx_initialized)
@@ -69,6 +71,7 @@ _sfx_stop::
 1$:
         xor     a
         ld      (_sfx_active), a
+        ei
         ret
 
 _music_play::
@@ -84,6 +87,7 @@ _music_play::
         call    music_call_init
         ld      a, #1
         ld      (_music_active), a
+        ei                              ; restore IM2 (music_call_* run DI)
         ret
 
 _music_stop::
@@ -93,6 +97,7 @@ _music_stop::
         call    music_call_mute
         xor     a
         ld      (_music_active), a
+        ei
         ret
 
 ; -------------------------------------------------------------------------
@@ -194,6 +199,7 @@ sample_drain:
 
         ld      a, (_cbl_saved_win3)
         out     (#SLOT3), a
+        ei                              ; sample blocked IM2 (DI); restore it
         ret
 
 ; sample_record_a: A = sample id. Out HL = record, carry on missing/out of range.

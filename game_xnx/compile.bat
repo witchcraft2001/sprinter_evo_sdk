@@ -34,6 +34,7 @@ rem список изображений, откуда брать графику
 set image.0=gfx\title.bmp
 set image.1=gfx\font816.bmp
 set image.2=gfx\font2432.bmp
+set color_key.2=1
 set image.3=gfx\bgmask.bmp
 set image.4=gfx\textback1.bmp
 set image.10=gfx\pic1.bmp

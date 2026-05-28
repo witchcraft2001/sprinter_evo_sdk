@@ -73,13 +73,117 @@ _evo_runtime_init::
         xor     a
         out     (#0xC9), a             ; visible screen A, blank bit clear
         ld      (_screen_active), a
-        call    clear_both_buffers_black
+        call    clear_both_buffers_black   ; runs DI (IM2 not yet enabled)
         call    _pal_clear
-        ; NB: stay DI. With CACHE on, WIN0=SRAM, so the IM1 vector (#0038) and
-        ; IM2 table are SRAM, not DSS -- an EI here would crash on the first
-        ; frame IRQ. Phase 1 has no interrupt handler (vsync is polled). IM2 +
-        ; EI come in Phase 2 (sound/time) once the handler lives in SRAM.
+        ; Arm CBL idle ONCE so #FE.5 (frame source) keeps toggling; _vsync polls
+        ; it for the FRAME (tear-free, no IM2 dependence).
+        ld      bc, #0x004E
+        ld      a, #0x80
+        out     (c), a
+        call    im2_sound_setup        ; CTC 50Hz IM2 -> _sound_tick + _time; EI
         ret
+
+; -------------------------------------------------------------------------
+; im2_sound_setup: CTC channel 3 generates a 50 Hz IM2 interrupt that ticks
+; sound (PT3 PLAY + AYFX FRAME) and the frame counter. The FRAME flip stays on
+; the #FE.5 poll (_vsync) -- IM2 is only for stable music/time timing, exactly
+; like evosdk_libs (crt0_game.s) + zx-sprinter-sdk. Vector table at #1F00 (SRAM,
+; I=#1F) in the free reserve gap; whole table -> im2_empty so any non-CTC vector
+; is a safe ei/reti. CTC CH3 vector #06 -> im2_sound_handler.
+; CAUTION: with IM2 live, every accelerator block (sprites/sync/clear) must run
+; DI so an IRQ can't fire mid-accel; those ops bracket themselves with di..ei.
+; -------------------------------------------------------------------------
+IM2_TABLE   = 0x1F00
+CTC_CH0     = 0x10
+CTC_CH2     = 0x12
+CTC_CH3     = 0x13
+
+im2_sound_setup:
+        di
+        ld      hl, #IM2_TABLE          ; fill table with im2_empty (safe default)
+        ld      de, #im2_empty
+        ld      b, #128
+1$:
+        ld      (hl), e
+        inc     hl
+        ld      (hl), d
+        inc     hl
+        djnz    1$
+        ld      hl, #im2_sound_handler  ; CTC CH3 vector (base0 -> +6) -> handler
+        ld      (IM2_TABLE + 6), hl
+        ; Vector #FF: the Sprinter video/keyboard IRQ fires ~50 Hz with vector
+        ; #FF (cf. evosdk_libs crt0_game.s setting 0xBEFF). With I=#1F it reads
+        ; the pointer from #1FFF/#2000 -- straddling the table end into the stack
+        ; bottom -- so it MUST be set to im2_empty or the CPU jumps to garbage
+        ; (symptom: sound ticks from CTC #06 but the main code is derailed = no
+        ; image). ld (#1FFF),hl writes L->#1FFF, H->#2000. #2000 is the lowest
+        ; stack byte (only touched on a >1023 B overflow, already fatal).
+        ld      hl, #im2_empty
+        ld      (IM2_TABLE + 0xFF), hl
+        ld      a, #0x1F
+        ld      i, a
+        im      2
+        ld      a, #0x57                ; CTC CH2/CH3 chain -> ~50 Hz (evosdk_libs)
+        out     (#CTC_CH2), a
+        ld      a, #112
+        out     (#CTC_CH2), a
+        ld      a, #0xD7                ; CH3: bit7 = interrupt enable
+        out     (#CTC_CH3), a
+        ld      a, #160
+        out     (#CTC_CH3), a
+        xor     a
+        out     (#CTC_CH0), a           ; CTC interrupt vector base = 0
+        ei
+        ret
+
+; IM2 handler (CTC, 50 Hz): bump 32-bit _time, then PT3/AFX frame. Full register
+; save (sound tick pages memory + uses the alternate set). Mirrors evosdk_libs
+; _evo_im2_handler. _sound_tick is only safe here because all accel ops run DI.
+im2_sound_handler:
+        push    af
+        push    bc
+        push    de
+        push    hl
+        push    ix
+        push    iy
+        .db     0x08                    ; ex af, af'
+        exx
+        push    af
+        push    bc
+        push    de
+        push    hl
+        ld      hl, #_time_counter
+        inc     (hl)
+        jr      nz, 2$
+        inc     hl
+        inc     (hl)
+        jr      nz, 2$
+        inc     hl
+        inc     (hl)
+        jr      nz, 2$
+        inc     hl
+        inc     (hl)
+2$:
+        call    _sound_tick
+        di                              ; _sound_tick's inner code may EI; re-DI
+        pop     hl
+        pop     de
+        pop     bc
+        pop     af
+        exx
+        .db     0x08                    ; ex af, af'
+        pop     iy
+        pop     ix
+        pop     hl
+        pop     de
+        pop     bc
+        pop     af
+        ei
+        reti
+
+im2_empty:
+        ei
+        reti
 
 ; void evo_runtime_shutdown(unsigned char exit_code)  [exit_code in L]
 ;   Copies a position-independent trampoline into a DRAM buffer (#B800, WIN2)
@@ -191,38 +295,35 @@ _border::
         ret
 
 _vsync::
-        ; Real frame sync by polling #FFFE bit 5 (1 while Y>256 = bottom blank,
-        ; 0 for Y<256). Wait for the high->low edge so callers resume at frame
-        ; start. Sprinter only toggles this bit while CBL is active, so arm CBL
-        ; in idle mode (#80 -> #004E) first. Pure polling -- DI-safe (Phase 1
-        ; stays fully DI; no EI/HALT, see HW_NOTES §7.1). Ref:
-        ; evosdk_libs/sprinter/lib/video_vsync.s, HW_NOTES §6.4.
-        ld      bc, #0x004E             ; CBL_CTRL: idle-on keeps #FE.5 toggling
-        ld      a, #0x80
-        out     (c), a
+        ; Tear-free frame sync by polling #FFFE bit5 (1 = bottom blank Y>256,
+        ; 0 = active). Wait until ACTIVE (bit5=0), then until the blank STARTS
+        ; (bit5 0->1) and return there so the caller flips in the blank. Catches
+        ; the next blank in <=1 frame, no extra full cycle. CBL armed once in
+        ; runtime_init. Pure polling (no interrupts needed). HW_NOTES §6.4.
+        ; _time is advanced by the CTC IM2 handler, not here.
         ld      de, #0x8000             ; timeout guard so we never hang
-1$:                                     ; wait until bit5 = 1 (into blank)
+1$:                                     ; wait until bit5 = 0 (active display)
         ld      a, #0xFF
         in      a, (#0xFE)
         bit     5, a
-        jr      nz, 2$
+        jr      z, 2$
         dec     de
         ld      a, d
         or      e
         jr      nz, 1$
-        jp      inc_time_counter        ; timeout: tick and return, do not hang
-2$:                                     ; wait until bit5 = 0 (frame start)
+        ret                             ; timeout: do not hang
+2$:                                     ; wait until bit5 = 1 (blank start = flip)
         ld      de, #0x8000
 3$:
         ld      a, #0xFF
         in      a, (#0xFE)
         bit     5, a
-        jp      z, inc_time_counter
+        ret     nz
         dec     de
         ld      a, d
         or      e
         jr      nz, 3$
-        jp      inc_time_counter
+        ret
 
 _swap_screen::
         call    _sprites_render_before_swap
@@ -309,6 +410,7 @@ _clear_screen::
         ld      hl, #2
         add     hl, sp
         ld      c, (hl)                 ; C = color (preserved across fills)
+        di                              ; block IM2 (sound) during accel fills
         call    begin_vram_write        ; WIN3 = #50
         ; Clear BOTH buffers so the background base stays in sync across flips
         ; (partial draw_tile updates are then synced per-cell by swap_screen).
@@ -317,7 +419,9 @@ _clear_screen::
         ld      hl, #VRAM_BUF1_BASE
         call    fill_buffer_320x256
         call    end_vram_write
-        jp      _tiles_clear_dirty      ; background uniform -> drop dirty marks
+        call    _tiles_clear_dirty      ; background uniform -> drop dirty marks
+        ei
+        ret
 
 ; begin_vram_write: WIN3 = page #50; select the HIDDEN (back) buffer base.
 ; Returns #C000 when visible is buffer 1, #C140 when visible is buffer 0.

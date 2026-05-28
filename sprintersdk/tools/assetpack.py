@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -24,10 +25,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn
+    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn, decode_text
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn
+    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn, decode_text
 
 
 TYPE_PAL = 0
@@ -45,6 +46,15 @@ HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 DEFAULT_PT3_PLAYER = Path(__file__).resolve().parent.parent / "pt3play.asm"
 DEFAULT_AFX_PLAYER = Path(__file__).resolve().parent.parent / "ayfxplay.asm"
+
+# Hardware-keyed flag stored in bit 15 of the IMG meta base_tile field.
+# select_image masks it off (tile space stays 0..0x7FFF -- ample: game_xnx
+# tops out near 10584). When set, draw_tile_key uses the WIN3=#58 HW path.
+HW_KEYED_FLAG = 0x8000
+
+COLOR_KEY_RE = re.compile(
+    r"^\s*set\s+color_key\.(\w+)\s*=\s*(\d+)", re.IGNORECASE
+)
 
 
 @dataclass
@@ -128,10 +138,28 @@ def pack_palette(path: Path) -> bytes:
     return bytes(payload)
 
 
-def pack_image(path: Path) -> tuple[bytes, int, int]:
+def parse_color_keys(manifest: Path) -> dict[str, int]:
+    """`set color_key.N=K` -> {N: K}. Declares image.N as drawn ONLY keyed,
+    with palette index K transparent; assetpack remaps K->0xFF and the runtime
+    uses the HW #58 path. Keyed indices come back keyed off the image's suffix
+    N (same N as image.N)."""
+    keys: dict[str, int] = {}
+    for line in decode_text(manifest).splitlines():
+        m = COLOR_KEY_RE.match(line)
+        if m:
+            keys[m.group(1).lower()] = int(m.group(2))
+    return keys
+
+
+def pack_image(path: Path, remap_key: int | None = None) -> tuple[bytes, int, int]:
     _palette, pixels, width, height, _bpp = read_bmp(path)
     if (width & 7) or (height & 7):
         raise SystemExit(f"assetpack: {path}: image dimensions must be 8px aligned")
+
+    if remap_key is not None:
+        # HW transparency (#58) only skips 0xFF. Bake the declared transparent
+        # index to 0xFF so the runtime can blit via #58 with no CPU compare.
+        pixels = bytes(0xFF if b == remap_key else b for b in pixels)
 
     out = bytearray()
     for ty in range(0, height, 8):
@@ -477,17 +505,29 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
     """Return (metadata_blob, page_data). page_data is num_pages*16KB in the
     region order gfx|spr|pal|mus|smp|sfx; metadata page indices are global."""
     entries, soundfx = parse_compile_bat(manifest)
+    color_keys = parse_color_keys(manifest)
 
     # --- tiles: concatenate every image's tiles, 256 tiles (16KB) per page ---
     gfx = bytearray()
     img_table: list[tuple[int, int, int]] = []      # (base_tile, w_tiles, h_tiles)
-    for _v, path in entries["image"]:
-        payload, w, h = pack_image(path)
+    for var_name, path in entries["image"]:
+        suffix = var_name.split(".", 1)[1] if "." in var_name else ""
+        key = color_keys.get(suffix)               # K if declared color_key.N=K
+        payload, w, h = pack_image(path, remap_key=key)
+        base_tile = len(gfx) // 64
+        if key is not None:
+            # Tag hw_keyed in bit 15 of base_tile (select_image masks it off).
+            if base_tile >= HW_KEYED_FLAG:
+                raise SystemExit(
+                    f"assetpack: {path}: base_tile {base_tile} >= 0x8000, no room "
+                    "for the hw_keyed flag bit"
+                )
+            base_tile |= HW_KEYED_FLAG
         # base_tile is u16 (global tile index, EvoSDK IMGLIST.tile). w/h tiles
         # are u8 like makeresh: only used by draw_image, which can't exceed the
         # 40x32 screen anyway. Big tilesheets (e.g. an 1x258 mask strip) are
         # drawn by tile index, so clamp their unused dims rather than wrap.
-        img_table.append((len(gfx) // 64, min(w // 8, 255), min(h // 8, 255)))
+        img_table.append((base_tile, min(w // 8, 255), min(h // 8, 255)))
         gfx += payload
     _pad_to_page(gfx)
     gfx_pages = len(gfx) // PAGE

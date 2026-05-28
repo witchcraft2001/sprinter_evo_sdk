@@ -59,7 +59,11 @@ select_image_a:
         add     hl, de
         ld      e, (hl)
         inc     hl
-        ld      d, (hl)                 ; de = base_tile (global)
+        ld      d, (hl)                 ; de = base_tile (bit15 = hw_keyed flag)
+        ld      a, d
+        and     #0x80                   ; bit 15 -> hw_keyed (0x80 / 0)
+        ld      (_image_hw_keyed), a
+        res     7, d                    ; mask flag -> real base_tile
         ld      (_image_base_tile), de
         inc     hl
         ld      a, (hl)                 ; w in tiles
@@ -93,7 +97,16 @@ _draw_tile_key::
         inc     hl
         ld      d, (hl)                 ; tile high
         call    draw_tile_setup
-        jp      draw_tile_keyed_rows
+        ld      a, (_image_hw_keyed)
+        or      a
+        jp      z, draw_tile_keyed_rows ; runtime key -> CPU compare/skip
+        ; hw_keyed image: the transparent index was baked to 0xFF at pack time.
+        ; Switch WIN3 to #58 (HW drops 0xFF + DRAM mirror still updates, so the
+        ; sprite background restore stays coherent) and blit with the fast
+        ; unrolled LDI burst -- no per-pixel CPU compare. ~6x faster.
+        ld      a, #0x58
+        out     (#0xE2), a
+        jp      draw_tile_unkeyed_rows
 
 _draw_tile::
         ld      a, (_image_selected)
@@ -496,6 +509,7 @@ sync_byte_next:
         out     (#0x89), a
         ld      a, (_sync_saved_win3)
         out     (#0xE2), a
+        ei                              ; re-enable IM2 (sound); accel block done
         ret
 
 ; sync_one_cell: copy the 8x8 cell at (_sync_x, _sync_ty) from the visible
@@ -566,6 +580,8 @@ _image_width_tiles:
 _image_height_tiles:
         .db     0
 _image_selected:
+        .db     0
+_image_hw_keyed:
         .db     0
 _color_key_value:
         .db     0

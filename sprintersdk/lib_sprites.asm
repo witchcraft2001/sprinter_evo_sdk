@@ -135,6 +135,7 @@ sprites_start_row:
 
         ld      a, #1
         ld      (_sprites_active), a
+        ei                              ; re-enable IM2 (sound); accel block done
         ret
 
 _sprites_stop::
@@ -263,6 +264,7 @@ draw_done:
         out     (#0xA2), a
         pop     iy
         pop     ix
+        ei                              ; re-enable IM2 (sound); accel block done
         ret
 
 ; -------------------------------------------------------------------------
@@ -306,6 +308,7 @@ restore_after_base_ok:
         ld      a, (_spr_win3)
         out     (#0xE2), a
         pop     ix
+        ei                              ; re-enable IM2 (sound); accel block done
         ret
 
 ; -------------------------------------------------------------------------
