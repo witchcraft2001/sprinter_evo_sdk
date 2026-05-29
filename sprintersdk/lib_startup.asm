@@ -46,7 +46,17 @@
 ;      EQUs MUST match loader.asm and lib_tiles.asm. ----
 EVO_PAGE_TABLE  = 0x1A00         ; asset phys page table (200 B, #1A00-#1AC7), loader-filled
 EVO_SAVED_VMODE = 0x1AC8         ; original DSS video mode (for exit), loader-filled
+EVO_SAVED_W0    = 0x1AC9         ; original DSS WIN0 phys page (for exit), loader-filled
+EVO_SAVED_W1    = 0x1ACA         ; original DSS WIN1 phys page (for exit), loader-filled
+EVO_SAVED_W3    = 0x1ACB         ; original DSS WIN3 phys page (for exit), loader-filled
 EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
+
+; Sprinter page-register ports (WIN0..WIN3). WIN2 is the program's own window
+; (loader/exit trampoline run there) and must NOT be restored on exit.
+SLOT0_PORT      = 0x82
+SLOT1_PORT      = 0xA2
+SLOT3_PORT      = 0xE2
+CBL_CTRL_PORT   = 0x89           ; CBL DAC / PORT_Y register
 
 ; The exit trampoline must execute with CACHE off (WIN0 = DSS BIOS, so SRAM is
 ; gone). We copy it -- and the values it needs -- transiently into WIN2 DRAM
@@ -54,6 +64,9 @@ EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
 ; reserved permanently.
 EXIT_VMODE_DRAM = 0x8000
 EXIT_CODE_DRAM  = 0x8001
+EXIT_W0_DRAM    = 0x8002
+EXIT_W1_DRAM    = 0x8003
+EXIT_W3_DRAM    = 0x8004
 EXIT_TRAMP_DRAM = 0x8010
 EXIT_TRAMP_SP   = 0xBF00
 
@@ -197,19 +210,37 @@ im2_empty:
         ei
         reti
 
+; void quit_to_dss(void)
+;   Sprinter-only public helper: return control to DSS with exit code 0. Thin
+;   wrapper over evo_runtime_shutdown so games can quit from their own menu
+;   (the normal exit path is crt0 falling off the end of main). Does not return.
+_quit_to_dss::
+        ld      l, #0
+        ; fall through to _evo_runtime_shutdown
+
 ; void evo_runtime_shutdown(unsigned char exit_code)  [exit_code in L]
-;   Copies a position-independent trampoline into a DRAM buffer (#B800, WIN2)
-;   and jumps into it. The trampoline turns CACHE off (so RST #10 reaches the
-;   real DSS BIOS at #0010), restores the video mode and WIN0 page saved by the
-;   loader, then DSS.Exit. Does not return. (cf. evosdk_libs evo_exit.s.)
+;   Copies a position-independent trampoline into a DRAM buffer (WIN2) and jumps
+;   into it. The trampoline turns CACHE off (so RST #10 reaches the real DSS BIOS
+;   at #0010), restores the DSS WIN0/WIN1/WIN3 pages + video mode saved by the
+;   loader, silences the CBL DAC, restores IM1 + EI (DSS returns under IM1 and
+;   HALT-waits for its timer IRQ -- staying in IM2 with IFF off hangs the BIOS),
+;   then DSS.Exit. Does not return. (cf. evosdk_libs evo_exit.s, flappybird
+;   set_im1/RestorePages, titd RESTORE_IM1_DSS. See HW_NOTES exit notes.)
 _evo_runtime_shutdown::
         di
         ; Launcher runs in SRAM (CACHE on): stash exit code + the saved video
-        ; mode (read from SRAM) into WIN2 DRAM, copy the trampoline to WIN2, run.
+        ; mode and DSS page numbers (read from SRAM) into WIN2 DRAM, copy the
+        ; trampoline to WIN2, run. The trampoline can't read SRAM (cache off).
         ld      a, l
         ld      (EXIT_CODE_DRAM), a
         ld      a, (EVO_SAVED_VMODE)
         ld      (EXIT_VMODE_DRAM), a
+        ld      a, (EVO_SAVED_W0)
+        ld      (EXIT_W0_DRAM), a
+        ld      a, (EVO_SAVED_W1)
+        ld      (EXIT_W1_DRAM), a
+        ld      a, (EVO_SAVED_W3)
+        ld      (EXIT_W3_DRAM), a
         ld      hl, #tramp_src
         ld      de, #EXIT_TRAMP_DRAM
         ld      bc, #tramp_end - tramp_src
@@ -219,17 +250,40 @@ _evo_runtime_shutdown::
 ; Position-independent, straight-line trampoline body. Copied into WIN2 DRAM and
 ; run there so it survives CACHE off (which turns WIN0/SRAM into DSS BIOS). Only
 ; absolute addresses (ports + the transient values in WIN2), no internal jumps.
+; WIN2 itself is left mapped (this code runs there) -- only WIN0/WIN1/WIN3 are
+; restored to their DSS pages.
 tramp_src:
         ld      sp, #EXIT_TRAMP_SP      ; DRAM stack (WIN0/SRAM gone after cache off)
         in      a, (#0x7B)              ; CACHE off -> WIN0 = DSS BIOS
+
+        ; Silence the CBL DAC (avoid a stuck level/click on return to DSS).
+        xor     a
+        out     (CBL_CTRL_PORT), a
+
+        ; Restore the DSS page layout the loader/crt0 clobbered (WIN0/1/3).
+        ld      a, (EXIT_W0_DRAM)
+        out     (SLOT0_PORT), a
+        ld      a, (EXIT_W1_DRAM)
+        out     (SLOT1_PORT), a
+        ld      a, (EXIT_W3_DRAM)
+        out     (SLOT3_PORT), a
+
+        ; Restore DSS video mode (RST #10 reaches real BIOS now that cache is off).
         push    ix                      ; SetVMod clobbers IX
         ld      a, (EXIT_VMODE_DRAM)
         ld      b, #0
         ld      c, #0x50                ; DSS SetVMod (restore video mode)
         rst     #0x10
         pop     ix
+
         ld      a, #0xC0
-        out     (#0x89), a              ; park PORT_Y
+        out     (CBL_CTRL_PORT), a      ; park PORT_Y at DSS-safe value
+
+        ; DSS runs under IM1 and HALT-waits for its timer IRQ on return; the game
+        ; ran IM2 with IFF off here, so re-arm IM1 + EI before handing back.
+        im      1
+        ei
+
         ld      a, (EXIT_CODE_DRAM)
         ld      b, a
         ld      c, #0x41                ; DSS.Exit (does not return)

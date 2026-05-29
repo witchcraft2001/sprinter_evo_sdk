@@ -74,6 +74,9 @@ l_meta      =       0xBC06          ; word: EVP1 meta byte count
 l_hot       =       0xBC08          ; word: bytes of chunk0 to copy into SRAM
 l_entry     =       0xBC0A          ; word: game entry
 l_page_tmp  =       0xBC0C          ; scratch: destination page being loaded
+l_dss_w0    =       0xBC0D          ; original DSS WIN0 phys page (for exit)
+l_dss_w1    =       0xBC0E          ; original DSS WIN1 phys page (for exit)
+l_dss_w3    =       0xBC0F          ; original DSS WIN3 phys page (for exit)
 l_pages     =       0xBC10          ; 4 bytes: code chunk physical pages
 l_assets    =       0xBC20          ; up to 200 bytes: asset physical pages (-> #BCE7, below SP #BFFF)
 l_hdr       =       0xBC80          ; 16-byte mini-header read buffer
@@ -90,10 +93,16 @@ MINI_FLAG_PACKED =  0x01
 ;      offset X is reachable at #4000+X. MUST match lib_startup.asm/lib_tiles.asm.
 EVO_PAGE_TABLE   = 0x1A00           ; SRAM: asset phys page table, 200 entries (#1A00-#1AC7)
 EVO_SAVED_VMODE  = 0x1AC8           ; SRAM: original DSS video mode (for exit)
+EVO_SAVED_W0     = 0x1AC9           ; SRAM: original DSS WIN0 phys page (for exit)
+EVO_SAVED_W1     = 0x1ACA           ; SRAM: original DSS WIN1 phys page (for exit)
+EVO_SAVED_W3     = 0x1ACB           ; SRAM: original DSS WIN3 phys page (for exit)
 EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE
 STAGE_SAVED_VMODE = STAGE + EVO_SAVED_VMODE
+STAGE_SAVED_W0   = STAGE + EVO_SAVED_W0
+STAGE_SAVED_W1   = STAGE + EVO_SAVED_W1
+STAGE_SAVED_W3   = STAGE + EVO_SAVED_W3
 STAGE_META       = STAGE + EVO_META
 
 ; =========================================================================
@@ -110,6 +119,16 @@ _loader_entry::
         rst     #0x10                   ; A = current video mode
         pop     ix
         ld      (l_vmode), a
+
+        ; --- 1b. Save the DSS page layout (WIN0/WIN1/WIN3) before we clobber it,
+        ;        so the exit trampoline can restore it. WIN2 is our own window.
+        ;        Page registers are readable (cf. flappybird IN A,(EmmWin.Px)). ---
+        in      a, (SLOT0)
+        ld      (l_dss_w0), a
+        in      a, (SLOT1)
+        ld      (l_dss_w1), a
+        in      a, (SLOT3)
+        ld      (l_dss_w3), a
 
         ; --- 2. read the 16-byte mini-header (FP is right after the loader) ---
         ld      hl, #l_hdr
@@ -259,6 +278,12 @@ asset_done:
         out     (SLOT1), a              ; WIN1 = chunk0
         ld      a, (l_vmode)
         ld      (STAGE_SAVED_VMODE), a  ; saved video mode (for exit)
+        ld      a, (l_dss_w0)
+        ld      (STAGE_SAVED_W0), a     ; saved DSS WIN0 page (for exit)
+        ld      a, (l_dss_w1)
+        ld      (STAGE_SAVED_W1), a     ; saved DSS WIN1 page (for exit)
+        ld      a, (l_dss_w3)
+        ld      (STAGE_SAVED_W3), a     ; saved DSS WIN3 page (for exit)
         ld      a, (l_M)
         or      a
         jr      z, tables_done

@@ -44,5 +44,5 @@ PYTHON      ?= python3
 SDCC_TARGET ?= -mz80
 SDCC_OPT    ?= --opt-code-speed
 SDCC_CFLAGS ?= $(SDCC_TARGET) $(SDCC_OPT)
-SDCPPFLAGS  ?=
+SDCPPFLAGS  ?= -D__SPRINTER__       # таргет-макрос: Sprinter-специфика в общих исходниках (main.c/evo.h)
 SDASZ_FLAGS ?= -plosgff       # as-z80: p=no-page l=lst o=obj s=sym g=undef-global f=relocs

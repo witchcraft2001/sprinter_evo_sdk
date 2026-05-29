@@ -247,3 +247,11 @@ u32 time(void) _naked;
 //задержка, значение в кадрах (1/50 секунды)
 
 void delay(u16 time) _naked;
+
+#ifdef __SPRINTER__
+//Sprinter-only: возврат управления в DSS (выход из программы).
+//На Evo-таргете отсутствует -- расширение специфики платформы (CLAUDE.md §2.2).
+//Не возвращается.
+
+void quit_to_dss(void) _naked;
+#endif
