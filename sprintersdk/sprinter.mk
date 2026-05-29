@@ -23,6 +23,7 @@ OUT      ?= $(if $(MANIFEST_OUTPUT),$(basename $(notdir $(MANIFEST_OUTPUT))),app
 RESGEN   ?= $(SDK_DIR)tools/resgen.py
 ASSETPACK ?= $(SDK_DIR)tools/assetpack.py
 DSS_EXE  ?= $(SDK_DIR)tools/dss_exe.py
+TRANSCODE_SOURCES ?= $(SDK_DIR)tools/transcode_sources.py
 MHMT     ?= $(SDK_DIR)tools/bin/mhmt
 SJASMPLUS ?= sjasmplus
 PT3_PLAYER ?= $(SDK_DIR)pt3play.asm
@@ -30,7 +31,10 @@ AFX_PLAYER ?= $(SDK_DIR)ayfxplay.asm
 PACK_ASSETS ?= 0
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
+CP866_SRC_DIR ?= $(BUILD)/src-cp866
+CP866_STAMP ?= $(BUILD)/src-cp866.stamp
 EXE      ?= $(BUILD)/$(OUT).exe
+PROJECT_EXE ?= $(PROJECT)/$(OUT).exe
 IHX2BIN  ?= $(SDK_DIR)tools/ihx2bin.py
 LOADER_SRC ?= $(SDK_DIR)loader.asm
 LOADER_BIN ?= $(BUILD)/loader.bin
@@ -47,6 +51,8 @@ SDKDATA_LOC ?= 0x1600           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
 CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
+CPPFLAGS_CP866 := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
+PROJECT_TEXT_SRCS := $(shell find $(PROJECT) -path $(BUILD) -prune -o -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 # crt0 должен идти первым в линковке (=> _entry на code-loc).
 # SDCC 2.9.0 z80 runtime-хелперы (* / % , long, сдвиги): прямой sdldz80 НЕ
@@ -64,10 +70,14 @@ sprinter: exe
 
 resources: $(RESOURCES_H)
 assets: $(ASSETS_DAT)
-exe: $(EXE)
+exe: $(PROJECT_EXE)
 
 $(RESOURCES_H): $(MANIFEST) $(RESGEN)
 	$(PYTHON) $(RESGEN) $(MANIFEST) -o $@
+
+$(CP866_STAMP): $(PROJECT_TEXT_SRCS) $(RESOURCES_H) $(TRANSCODE_SOURCES) | $(BUILD)
+	$(PYTHON) $(TRANSCODE_SOURCES) $(PROJECT) $(CP866_SRC_DIR) --encoding cp866
+	@printf '%s\n' 'encoding=cp866' > $@
 
 $(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) $(PT3_PLAYER) $(AFX_PLAYER) | $(BUILD)
 	SJASMPLUS="$(SJASMPLUS)" PT3_PLAYER="$(PT3_PLAYER)" AFX_PLAYER="$(AFX_PLAYER)" $(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
@@ -103,6 +113,9 @@ $(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP)
 	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) \
 	    --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS)
 
+$(PROJECT_EXE): $(EXE)
+	cp $< $@
+
 # --- Link: генерируем .lk и зовём sdldz80 напрямую ---
 $(BUILD)/$(OUT).ihx: $(OBJS)
 	@printf '%s\n' '-mjx'                  > $(BUILD)/$(OUT).lk
@@ -133,8 +146,8 @@ $(BUILD)/evo.rel: $(SDK_DIR)evo.c $(SDK_DIR)evo.h | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/evo.asm
 	cp $@ $(basename $@).o
 
-$(BUILD)/main.rel: $(PROJECT)/main.c $(RESOURCES_H) | $(BUILD)
-	$(SDCPP) $(CPPFLAGS) $< > $(BUILD)/main.i
+$(BUILD)/main.rel: $(CP866_STAMP) | $(BUILD)
+	$(SDCPP) $(CPPFLAGS_CP866) $(CP866_SRC_DIR)/main.c > $(BUILD)/main.i
 	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/main.asm < $(BUILD)/main.i
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/main.asm
 	cp $@ $(basename $@).o

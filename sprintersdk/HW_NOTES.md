@@ -333,8 +333,10 @@ ver@3, офсет кода@4) → **формат корректен и совм�
 - При `LD_ADDR` в WIN1 (`#4100`) DSS маппит выделенные страницы в SLOT1/SLOT2/SLOT3.
 
 **DSS API (через `RST #10`, функция в `C`):**
-- **GetMem `#3D`**: `B`=число 16K-страниц → `A`=номер физ.страницы (CF=ошибка). Маппинг:
-  `OUT (SLOTn),A`, где SLOT0=`#82`/WIN0, SLOT1=`#A2`/WIN1, SLOT2=`#C2`/WIN2, SLOT3=`#E2`/WIN3.
+- **GetMem `#3D`**: `B`=число 16K-страниц → `A`=DSS-handle блока (CF=ошибка), см.
+  `Estex-DSS/DSS/API/GetMem.asm`. Для прямого маппинга через `OUT (SLOTn),A` нужен
+  список физических страниц блока: `BIOS.GetMemBlkPages #C5` (`A`=handle,
+  `HL`=буфер списка), см. `sprinter_bios/.../FUNC_RAM_ROM_DRV.ASM`.
 - **Read**: `HL`=буфер, `DE`=размер, `A`=FM → читает с текущей FP (FP++). Внутри для
   «хвостов» <512 Б временно использует SLOT3 (сохраняет/восстанавливает) — **стейджить
   через WIN2, не WIN3**, или учитывать.
@@ -358,17 +360,24 @@ SetVMod — подтверждено на эмуляторе (после SetVMod
 1. `DI`; `SP=#BFFF` (своя WIN2-страница); `FM=(IX-3)`; сохранить видеорежим (`GetVMod`).
 2. Прочитать мини-заголовок (K=код-чанков, M=data-страниц, meta_size, hot_size, entry).
 3. `SetVMod #81` (обе буфер-страницы) — пока WIN0=DSS; затирает WIN1 (не важно, мы в WIN2).
-4. K раз: `GetMem`→p; `OUT (#A2),p` (WIN1); `Dss.Read` 16K в `#4000`; запомнить `code_pages[i]`.
-5. Метаданные EVP1 + M ассет-страниц (так же через WIN1), записать `page_table[]`.
+4. `GetMem(K)` возвращает DSS-handle блока; `BIOS.GetMemBlkPages(handle,l_pages)` даёт
+   физические страницы кода. Для каждой страницы: `OUT (#A2),p`; `Dss.Read` 16K в
+   `#4000`; `code_pages[i]=p`. Прямой `OUT (#A2),handle` неверен: runtime работает с
+   физическими страницами, не с DSS-handle.
+5. Метаданные EVP1 + `GetMem(M)` для ассет-страниц; `BIOS.GetMemBlkPages` заполняет
+   физические страницы, которые загрузчик записывает в `page_table[]`.
 6. Таблицы SDK — в **SRAM-регионе SDK** (зеркало EvoSDK `#FB00+`): `page_table`@`#1A00`,
-   `saved_vmode`@`#1A40`, EVP1-meta@`#1B00`. Загрузчик пишет их в `code_pages[0]` (hot-blob)
+   saved DSS windows `#1AC8..#1ACB`, EVP1-meta@`#1B00`. Загрузчик пишет их в `code_pages[0]` (hot-blob)
    **через WIN1-стейджинг** (chunk0 в WIN1: адрес `X` виден по `#4000+X`) — до `LDIR`→SRAM.
    Отдельной области в DRAM (`#B000` и т.п.) НЕТ.
 7. **CACHE ON**: `OUT (#8F),0` + `IN A,(#FB)` → WIN0=SRAM; `LDIR` hot-blob `code_pages[0]`
    (в WIN1 `#4000`) → `#0000`. Замапить WIN1=`code_pages[1]`, WIN3=`code_pages[3]`. WIN2
    (своя страница) оставить crt0.
 8. `LD A,code_pages[2]`; `JP #2400` (вход crt0 в SRAM). crt0: `OUT (#C2),A` (WIN2=C),
-   `SP=#23FF`, `gsinit`, `runtime_init`, `main`.
+   `SP=#23FF`, `gsinit`, `runtime_init`, `main`. Runtime не должен трогать WIN2:
+   C-код/данные в `#8000..#BFFF` должны оставаться неподвижными. `border()` реализован
+   через EvoSDK-совместимый `OUT (#FE),A`; альтернативные нативные border-алиасы в SDK
+   не используются, потому что они портят WIN2/page path на Sprinter.
 9. **Выход**: `runtime_shutdown` (в SRAM) копирует PI-трамплин в WIN2 DRAM транзитно
    (C завершён), читает `saved_vmode` из SRAM до cache-off; трамплин: `IN A,(#7B)` →
    restore vmode (`RST#10` C=`#50`) → `Dss.Exit`. SLOT0/IM не трогаем (DSS не зависит).
@@ -631,7 +640,8 @@ accel — грамотны и в основном оптимальны (это a
 **Метаданные (→ RAM):** `IMG` `{u16 base_tile, u8 wt, u8 ht}` (индекс=id); `PAL`
 `{u8 page, u16 off}`; `MUS` `{u8 page, u16 off, u16 len}`; `SMP`
 `{u8 page, u16 off, u16 len, u8 cbl}`; `SFX` `{page,off,len}`. Все `page` — **глобальные
-индексы** в `page_table[]`, который загрузчик заполняет (GetMem на `num_pages`).
+индексы** в `page_table[]`; загрузчик заполняет таблицу физическими страницами,
+полученными через `DSS.GetMem` + `BIOS.GetMemBlkPages`.
 
 **Страницы:** `num_pages × 16 КБ` в порядке `gfx | spr | pal | mus | smp | sfx`
 (опц. SPK1/HRUST по `PACK_ASSETS`).
@@ -645,6 +655,6 @@ accel — грамотны и в основном оптимальны (это a
 `draw_image`; тайл-листы рисуются по индексу).
 
 Сгенерировано `assetpack.py --paged`; проверено на game_xnx (45 страниц, gfx 39, таблицы
-сверены). **Потребители (Этап 2/3): `loader.asm`** (GetMem+Read+DePACK страниц, заполнить
-`page_table`, скопировать метаданные в RAM) и **переделка `select_image`/`pal_select`/
+сверены). **Потребители (Этап 2/3): `loader.asm`** (GetMem+BIOS page-list+Read+DePACK страниц,
+заполнить `page_table`, скопировать метаданные в RAM) и **переделка `select_image`/`pal_select`/
 `draw_tile`** на прямой индекс + map page. `find_asset_record` (линейный поиск) удаляется.

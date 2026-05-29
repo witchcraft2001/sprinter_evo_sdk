@@ -24,10 +24,9 @@
 ;       (K+M) word payload-size table; 0x4000=raw page, smaller=HRUST .hst.
 ;    3. DSS SetVMod #81 (320x256x8) on both buffer pages -- done here while
 ;       WIN0=DSS, so the SRAM runtime never has to call DSS for video.
-;    4. For each of K code chunks: GetMem a page, read raw 16 KB into it, or
-;       read the HRUST .hst into the dest page (WIN3 #C000) and DePACK it in
-;       place -- exactly like sdcc-sprinter-sdk asset_load_pages.c. No temp
-;       page, no cross-window depack. chunk0 -> SRAM(hot), 1->WIN1,2->WIN2,3->WIN3.
+;    4. Allocate one DSS block for K code chunks, ask BIOS for its physical page
+;       list, then read raw 16 KB into each page (or read + HRUST-depack packed
+;       payloads). chunk0 -> SRAM(hot), 1->WIN1,2->WIN2,3->WIN3.
 ;    5. Read EVP1 metadata + M asset pages; record asset pages in the table.
 ;    6. Write the SDK tables (page table #1A00, saved vmode #1AC8) into chunk0
 ;       via the WIN1 staging view (#4000+offset), before chunk0 is LDIR'd.
@@ -60,6 +59,8 @@ DSS_SETVMOD =       0x50
 DSS_GETVMOD =       0x51
 DSS_EXIT    =       0x41
 DSS_PUTCHAR =       0x5B            ; print char in A to the DSS console (text mode)
+
+BIOS_GETMEMBLKPAGES = 0xC5
 
 VIDEO_MODE  =       0x81            ; 320x256x8bpp
 
@@ -155,7 +156,7 @@ _loader_entry::
         ;        screen stays in DSS text mode during loading (no graphics
         ;        garbage flash) and switches to 320x256x8 only before the jump. ---
 
-        ; --- 3b. Optional packed-body setup: read the (K+M)*2 payload size
+        ; --- 3a. Optional packed-body setup: read the (K+M)*2 payload size
         ;        table. Packed pages are depacked in place in the dest window;
         ;        raw pages (size 0x4000) load exactly like uncompressed bodies. ---
         ld      a, (l_flags)
@@ -183,20 +184,22 @@ no_packed_table:
         ld      hl, #msg_loading
         call    puts
 
-        ; --- 4. load K code chunks (each: GetMem -> WIN1 -> read 16K) ---
+        ; --- 4. load K code chunks (DSS block -> BIOS phys list -> read 16K) ---
+        ld      a, (l_K)
+        ld      b, a
+        ld      hl, #l_pages
+        call    getmem_pages
         ld      b, #0                   ; chunk index
 load_code_loop:
         ld      a, (l_K)
         cp      b
         jr      z, load_code_done
         push    bc
-        call    getmem_page             ; A = phys page
-        pop     bc
-        push    bc
         ld      c, b
         ld      b, #0
         ld      hl, #l_pages
         add     hl, bc                  ; &l_pages[i]
+        ld      a, (hl)                 ; A = physical page
         ld      (hl), a
         ld      (l_page_tmp), a
         ld      a, (l_flags)
@@ -234,21 +237,25 @@ load_code_done:
         rst     #0x10
         pop     ix
 
-        ; --- 5b. M asset pages (GetMem -> WIN1 -> read 16K), record page no ---
+        ; --- 5b. M asset pages (DSS block -> BIOS phys list -> read 16K) ---
 load_assets:
+        ld      a, (l_M)
+        or      a
+        jr      z, asset_done
+        ld      b, a
+        ld      hl, #l_assets
+        call    getmem_pages
         ld      b, #0
 asset_loop:
         ld      a, (l_M)
         cp      b
         jr      z, asset_done
         push    bc
-        call    getmem_page
-        pop     bc
-        push    bc
         ld      c, b
         ld      b, #0
         ld      hl, #l_assets
         add     hl, bc
+        ld      a, (hl)                 ; A = physical page
         ld      (hl), a                 ; l_assets[j] = phys page
         ld      (l_page_tmp), a
         ld      a, (l_flags)
@@ -372,15 +379,26 @@ msg_nomem:
         .db     0x0D, 0x0A, 0
 
 ; -------------------------------------------------------------------------
-; getmem_page: DSS GetMem 1 page -> A = physical page. On error, halts
-;   (no graceful path yet; the EXE is sized so allocation should succeed).
-getmem_page:
+; getmem_pages: allocate B DSS memory pages and fill HL with physical page list.
+;   DSS.GetMem returns a memory block handle. BIOS.GetMemBlkPages resolves that
+;   handle into physical page numbers; runtime hot paths use direct OUT
+;   (#A2/#C2/#E2), so l_pages/page_table must contain physical pages.
+getmem_pages:
         push    ix
-        ld      b, #1
+        push    hl
         ld      c, #DSS_GETMEM
         rst     #0x10
+        jr      c, getmem_pages_error_pophl
+        pop     hl
+        ld      c, #BIOS_GETMEMBLKPAGES
+        rst     #0x08
+        jr      c, getmem_pages_error
         pop     ix
-        ret     nc                      ; success: A = physical page
+        ret
+getmem_pages_error_pophl:
+        pop     hl
+getmem_pages_error:
+        pop     ix
         ; --- Out of memory: the EXE needs more free pages than DSS has. We are
         ; still in DSS text mode (video is switched only in step 6b) and CACHE is
         ; off, so report it and return to DSS with a non-zero code instead of

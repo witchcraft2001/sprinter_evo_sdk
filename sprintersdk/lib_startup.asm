@@ -357,7 +357,7 @@ _border::
         add     hl, sp
         ld      a, (hl)
         and     #7
-        out     (#0xCA), a              ; BORDER alias, see manual/include/ports.inc
+        out     (#0xFE), a              ; EvoSDK-compatible border port
         ret
 
 _vsync::
