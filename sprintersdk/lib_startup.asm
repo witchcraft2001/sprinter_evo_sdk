@@ -37,7 +37,6 @@
         .globl  _sprites_restore_after_swap
         .globl  _sound_tick
         .globl  _sync_tiles_to_shadow   ; from lib_tiles (dual-buffer tile sync)
-        .globl  _tiles_clear_dirty      ; from lib_tiles
 
         .area   _SDK
 
@@ -478,14 +477,12 @@ _clear_screen::
         ld      c, (hl)                 ; C = color (preserved across fills)
         di                              ; block IM2 (sound) during accel fills
         call    begin_vram_write        ; WIN3 = #50
-        ; Clear BOTH buffers so the background base stays in sync across flips
-        ; (partial draw_tile updates are then synced per-cell by swap_screen).
-        ld      hl, #VRAM_BUF0_BASE
-        call    fill_buffer_320x256
-        ld      hl, #VRAM_BUF1_BASE
+        ; EvoSDK clear_screen() clears the shadow/back screen only. Many games
+        ; draw the same room twice around swap_screen() to seed both buffers;
+        ; clearing the visible buffer here breaks overlay/dialog rendering.
+        ld      hl, (_vram_base)
         call    fill_buffer_320x256
         call    end_vram_write
-        call    _tiles_clear_dirty      ; background uniform -> drop dirty marks
         ei
         ret
 

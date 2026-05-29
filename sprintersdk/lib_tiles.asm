@@ -22,7 +22,6 @@
         .globl  _draw_tile_key
         .globl  _draw_image
         .globl  _sync_tiles_to_shadow   ; called by swap_screen (lib_startup)
-        .globl  _tiles_clear_dirty      ; called by clear_screen (lib_startup)
 
         ; --- imported from lib_startup.asm ---
         .globl  begin_vram_write
@@ -409,18 +408,6 @@ mark_tile_dirty:
         pop     bc
         pop     de
         pop     hl
-        ret
-
-; _tiles_clear_dirty: drop all dirty marks (after a full clear_screen of both
-;   buffers, the background is uniform -- no per-cell sync needed).
-_tiles_clear_dirty::
-        xor     a
-        ld      (_tile_dirty_any), a
-        ld      hl, #_tile_dirty
-        ld      de, #_tile_dirty + 1
-        ld      bc, #TILE_DIRTY_ROWS * TILE_DIRTY_STRIDE - 1
-        ld      (hl), #0
-        ldir
         ret
 
 ; _sync_tiles_to_shadow: copy every dirty 8x8 cell from the visible buffer's
