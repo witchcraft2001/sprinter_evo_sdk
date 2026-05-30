@@ -20,8 +20,9 @@
 ;  Sequence:
 ;    1. Save FM + original video mode (DSS GetVMod).
 ;    2. Read the 16-byte body mini-header (K code chunks, M asset pages,
-;       flags, meta_size, hot_size, entry). If flags.bit0 is set, read the
-;       (K+M) word payload-size table; 0x4000=raw page, smaller=HRUST .hst.
+;       flags, meta_size, hot_size, entry), then the 32-byte title field, and
+;       print the title (full loading message). If flags.bit0 is set, read the (K+M) word
+;       payload-size table; 0x4000=raw page, smaller=HRUST .hst.
 ;    3. DSS SetVMod #81 (320x256x8) on both buffer pages -- done here while
 ;       WIN0=DSS, so the SRAM runtime never has to call DSS for video.
 ;    4. Allocate one DSS block for K code chunks, ask BIOS for its physical page
@@ -80,6 +81,9 @@ l_dss_w1    =       0xBC0E          ; original DSS WIN1 phys page (for exit)
 l_dss_w3    =       0xBC0F          ; original DSS WIN3 phys page (for exit)
 l_pages     =       0xBC10          ; 4 bytes: code chunk physical pages
 l_assets    =       0xBC20          ; up to 200 bytes: asset physical pages (-> #BCE7, below SP #BFFF)
+l_title     =       0xBC40          ; 32-byte title field, read+printed before any page
+                                    ;   load; overlaps the l_assets scratch (only filled
+                                    ;   in step 5, after the banner) -- safe to reuse.
 l_hdr       =       0xBC80          ; 16-byte mini-header read buffer
 l_sizes     =       0xBCA0          ; up to 68 words: packed payload sizes
 l_hrust_sp  =       0xBD40          ; saved loader SP while HRUST uses SP as input
@@ -87,6 +91,8 @@ l_hrust_stack_top =  0xBD80          ; small private stack for the HRUST depacke
 LOADER_SP   =       0xBFFF          ; loader stack top (own WIN2 page)
 
 MINI_FLAG_PACKED =  0x01
+TITLE_LEN   =       32              ; fixed title field after the mini-header
+                                    ;   (must match dss_exe.py MONOBLOCK_TITLE_LEN)
 
 ; ---- SDK runtime tables live in the SDK SRAM region (mirror of EvoSDK
 ;      #E000-#FFFF). The loader writes them into chunk0 (which it then LDIRs into
@@ -152,6 +158,26 @@ _loader_entry::
         ld      hl, (l_hdr+8)           ; entry
         ld      (l_entry), hl
 
+        ; --- 2b. Read the fixed title field (right after the mini-header) and print
+        ;        it verbatim while still in DSS text mode. The title is the full
+        ;        loading message from `set title=` in compile.bat (it already reads
+        ;        e.g. "CODENAME ROBO IS LOADING" -- no "Loading" prefix is added).
+        ;        Printed BEFORE the packed size table is read, so l_title may
+        ;        overlap later scratch. ---
+        ld      hl, #l_title
+        ld      de, #TITLE_LEN
+        ld      a, (l_fm)
+        ld      c, #DSS_READ
+        push    ix
+        rst     #0x10
+        pop     ix
+        ld      hl, #l_title            ; NUL-terminated title (NUL-padded by dss_exe)
+        call    puts
+        ld      a, #0x0D                ; CR + LF: move the console to a fresh line
+        call    putc
+        ld      a, #0x0A
+        call    putc
+
         ; --- 3. Video mode is set AFTER loading (step 6b), not here, so the
         ;        screen stays in DSS text mode during loading (no graphics
         ;        garbage flash) and switches to 320x256x8 only before the jump. ---
@@ -177,12 +203,6 @@ _loader_entry::
         rst     #0x10
         pop     ix
 no_packed_table:
-
-        ; Show a "loading" message while the screen is still in DSS text mode
-        ; (video #81 is set only in step 6b). Each loaded page prints a '.', so
-        ; a slow disk read clearly shows progress instead of looking hung.
-        ld      hl, #msg_loading
-        call    puts
 
         ; --- 4. load K code chunks (DSS block -> BIOS phys list -> read 16K) ---
         ld      a, (l_K)
@@ -216,8 +236,6 @@ load_code_raw:
         call    read_16k_win1
 load_code_next:
         pop     bc
-        ld      a, #0x2E                ; progress dot per loaded page ('.')
-        call    putc
         inc     b
         jr      load_code_loop
 load_code_done:
@@ -274,8 +292,6 @@ load_asset_raw:
         call    read_16k_win1
 load_asset_next:
         pop     bc
-        ld      a, #0x2E                ; progress dot per loaded page ('.')
-        call    putc
         inc     b
         jr      asset_loop
 asset_done:
@@ -360,7 +376,7 @@ putc:
         ret
 
 ; puts: print the null-terminated string at HL. Clobbers A (HL preserved by
-;   putc, advanced here). Used for the "loading" banner.
+;   putc, advanced here). Used for the title banner and the out-of-memory message.
 puts:
         ld      a, (hl)
         or      a
@@ -368,10 +384,6 @@ puts:
         call    putc
         inc     hl
         jr      puts
-
-msg_loading:
-        .ascii  "Loading"
-        .db     0
 
 msg_nomem:
         .db     0x0D, 0x0A

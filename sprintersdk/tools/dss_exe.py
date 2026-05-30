@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -31,6 +32,11 @@ LOADER_SP = 0xBFFF
 MINIHDR_SIZE = 16
 MINIHDR_MAGIC = ord("L")
 MINIHDR_FLAG_PACKED = 0x01
+# Fixed-size title field that follows the mini-header in the monoblock body. The
+# loader reads exactly this many bytes and prints "Loading <title>" (the field is
+# NUL-padded, so it is also NUL-terminated for the loader's puts). MUST match
+# TITLE_LEN in loader.asm.
+MONOBLOCK_TITLE_LEN = 32
 EVP_MAGIC = b"EVP1"
 EVP_HEADER_SIZE = 16
 # SDK SRAM table region (loader.asm EVO_*): #1A00 page table (200 B, #1A00-#1AC7) /
@@ -286,22 +292,50 @@ def pack_pages(pages: list[bytes], mhmt: Path) -> tuple[list[int], list[bytes], 
     return sizes, payloads, saved
 
 
+def read_manifest_title(manifest: Path | None) -> bytes:
+    """Extract `set title=...` from a compile.bat manifest as a display string.
+
+    Returns the title bytes (quotes/whitespace stripped), truncated to fit the
+    NUL-terminated MONOBLOCK_TITLE_LEN field. Bytes are kept verbatim (the DSS
+    text console renders them) -- ASCII titles work as-is. Empty on no title.
+    """
+    if not manifest or not manifest.exists():
+        return b""
+    raw = manifest.read_bytes()
+    for line in raw.splitlines():
+        m = re.match(rb"\s*set\s+title\s*=(.*)$", line, re.IGNORECASE)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if len(value) >= 2 and value[:1] == b'"' and value[-1:] == b'"':
+            value = value[1:-1]
+        value = value.strip()
+        # Leave room for the NUL terminator inside the fixed field.
+        return value[: MONOBLOCK_TITLE_LEN - 1]
+    return b""
+
+
 def build_monoblock(
     code: bytes,
     loader: bytes,
     assets: bytes,
     entry: int,
     *,
+    title: bytes = b"",
     pack: bool = False,
     mhmt: Path | None = None,
 ) -> tuple[bytes, int, int, int, int]:
     """Assemble a DSS PRELOAD monoblock EXE the loader.asm reads.
 
     Unpacked body:
-        [16B mini-header][K x 16 KB code chunks][meta][M x 16 KB asset pages].
+        [16B mini-header][32B title][K x 16 KB code chunks][meta][M x 16 KB pages].
     Packed body:
-        [16B mini-header][(K+M) x u16 payload sizes]
+        [16B mini-header][32B title][(K+M) x u16 payload sizes]
         [K code payloads][meta][M asset payloads].
+
+    The title field (NUL-padded `set title=` from compile.bat) is read by the
+    loader right after the mini-header and printed verbatim as the loading banner
+    (the title is the full message, e.g. "CODENAME ROBO IS LOADING").
 
     A payload size of 0x4000 means raw 16 KB; any smaller size is HRUST .hst.
     """
@@ -347,6 +381,10 @@ def build_monoblock(
     struct.pack_into("<H", minihdr, 6, MONOBLOCK_HOT_SIZE)
     struct.pack_into("<H", minihdr, 8, entry)
 
+    # Fixed NUL-padded title field, read by the loader right after the mini-header
+    # to print "Loading <title>". MONOBLOCK_TITLE_LEN must match loader.asm.
+    title_field = title[: MONOBLOCK_TITLE_LEN - 1].ljust(MONOBLOCK_TITLE_LEN, b"\x00")
+
     header = make_header(LOADER_LOAD, LOADER_LOAD, LOADER_SP, loader_size=len(loader))
     saved = 0
 
@@ -361,13 +399,14 @@ def build_monoblock(
             size_table += struct.pack("<H", size)
         body = (
             bytes(minihdr)
+            + title_field
             + bytes(size_table)
             + b"".join(payloads[:k])
             + meta_blob
             + b"".join(payloads[k:])
         )
     else:
-        body = bytes(minihdr) + image + meta_blob + b"".join(data_pages)
+        body = bytes(minihdr) + title_field + image + meta_blob + b"".join(data_pages)
 
     return header + loader + body, k, m, len(meta_blob), saved
 
@@ -399,6 +438,11 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--loader", type=Path, help="assembled PRELOAD loader binary")
     parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="compile.bat; its `set title=` is printed verbatim by the loader as the banner",
+    )
+    parser.add_argument(
         "--pack",
         action="store_true",
         help="HRUST-pack monoblock code/asset pages; raw pages are kept when not smaller",
@@ -426,11 +470,13 @@ def main(argv: list[str]) -> int:
         code = image_from_zero(parse_ihx(args.input))
         loader = args.loader.read_bytes()
         assets = args.assets.read_bytes() if args.assets else b""
+        title = read_manifest_title(args.manifest)
         exe, k, m, meta, saved = build_monoblock(
             code,
             loader,
             assets,
             MONOBLOCK_ENTRY,
+            title=title,
             pack=args.pack,
             mhmt=args.mhmt,
         )
@@ -439,10 +485,11 @@ def main(argv: list[str]) -> int:
         tmp.write_bytes(exe)
         tmp.replace(args.output)
         pack_info = f", packed saved={saved} B" if args.pack else ""
+        title_info = f', title="{title.decode("latin-1")}"' if title else ""
         print(
             f"dss_exe: wrote {args.output} (mode=monoblock, loader={len(loader)} B, "
             f"code={len(code)} B -> {k} chunks, meta={meta} B, asset_pages={m}, "
-            f"total={len(exe)} B{pack_info})"
+            f"total={len(exe)} B{pack_info}{title_info})"
         )
         return 0
 

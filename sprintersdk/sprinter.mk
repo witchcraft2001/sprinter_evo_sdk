@@ -108,10 +108,10 @@ $(LOADER_BIN): $(BUILD)/loader.rel
 # Monoblock DSS PRELOAD EXE: header + loader + paged code/assets inside.
 # DSS loads only the loader (#4100/WIN1); it stages code into pages, copies the
 # hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
-$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP)
+$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP) $(MANIFEST)
 	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
 	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) \
-	    --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS)
+	    --manifest $(MANIFEST) --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS)
 
 $(PROJECT_EXE): $(EXE)
 	cp $< $@
