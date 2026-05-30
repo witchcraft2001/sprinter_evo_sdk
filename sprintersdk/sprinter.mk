@@ -29,6 +29,12 @@ SJASMPLUS ?= sjasmplus
 PT3_PLAYER ?= $(SDK_DIR)pt3play.asm
 AFX_PLAYER ?= $(SDK_DIR)ayfxplay.asm
 PACK_ASSETS ?= 0
+# UNROLL=1 builds the speed (unrolled) variants of the graphics output loops in
+# lib_tiles/lib_sprites; UNROLL=0 (default) builds the compact looped variants.
+# Passed to the assembler as a `UNROLL = N` prelude prepended to each SDK .asm
+# (as-z80-2.9.0 has no -D; conditional assembly via `.if UNROLL`). See §8/CLAUDE.md.
+UNROLL ?= 0
+UNROLL_STAMP ?= $(BUILD)/unroll.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
 CP866_SRC_DIR ?= $(BUILD)/src-cp866
@@ -95,6 +101,11 @@ $(PACK_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'PACK_ASSETS=$(PACK_ASSETS)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+$(UNROLL_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'UNROLL=$(UNROLL)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
 $(BUILD)/loader.rel: $(LOADER_SRC) | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
@@ -135,8 +146,12 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 	cp $@ $(basename $@).o
 
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
-$(BUILD)/%.rel: $(SDK_DIR)%.asm | $(BUILD)
-	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
+# Prepend `UNROLL = N` so the libs can pick the unrolled vs compact output loops
+# via `.if UNROLL` (as-z80 has no -D). Changing UNROLL re-touches the stamp.
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) | $(BUILD)
+	@printf 'UNROLL = %s\n' '$(UNROLL)' > $(BUILD)/$*.gen.asm
+	@cat $< >> $(BUILD)/$*.gen.asm
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o
 
 # --- C (.c) -> .rel (в три шага, см. шапку) ---

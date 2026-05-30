@@ -195,6 +195,105 @@ draw_dest_x_patch:
 ;     the loop terminates when PORT_Y reaches start+8 -- no separate counter, no
 ;     EXX, no per-row memory access. Main BC is free for the LDI burst. ---
 draw_tile_unkeyed_rows:
+        .if UNROLL
+        ; --- 8 rows unrolled. A = PORT_Y (preserved across LDI); HL (src) advances
+        ;     via LDI; DE is reset to the dest column each row (LDI advances it).
+        ;     Row 0 holds the setup-patched dest immediate; rows 1-7 read it back.
+        ;     Drops the per-row PORT_Y compare + jr. ---
+        ld      a, (_draw_y)            ; A = PORT_Y
+        out     (#0x89), a
+        inc     a
+draw_dest_patch:
+        ld      de, #0                  ; dest column base (patched by setup)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        inc     a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        out     (#0x89), a
+        ld      de, (draw_dest_patch + 1)
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        call    end_vram_write
+        ld      a, (_draw_saved_win1)   ; restore WIN1 (C code lives there)
+        out     (#0xA2), a
+        ret
+        .else
         ld      a, (_draw_y)
         add     a, #8
         ld      (draw_tile_unkeyed_end + 1), a   ; loop ends when PORT_Y == start+8
@@ -219,6 +318,7 @@ draw_tile_unkeyed_end:
         ld      a, (_draw_saved_win1)   ; restore WIN1 (C code lives there)
         out     (#0xA2), a
         ret
+        .endif
 
 ; --- Keyed rows: B = transparent key, C = PORT_Y (also the loop counter, via a
 ;     compare against start+8). No per-row memory access; the inner compare/skip
@@ -523,6 +623,83 @@ sync_one_cell:
         add     a, a
         add     a, #VRAM_Y_OFFSET
         ld      b, a                    ; B = PORT_Y
+        .if UNROLL
+        ; --- 8 rows unrolled: HL=src col, DE=dst col (both constant), B=PORT_Y++.
+        ;     Drops the per-row `dec c / jr nz`, shortening the DI window that
+        ;     _sync_tiles_to_shadow holds across all dirty cells (HW_NOTES §4). ---
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #8
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        ret
+        .else
         ld      c, #8                   ; 8 rows
 sync_cell_row:
         ld      a, b
@@ -537,6 +714,7 @@ sync_cell_row:
         dec     c
         jr      nz, sync_cell_row
         ret
+        .endif
 
         .area   _SDKDATA
 _tile_dirty_any:

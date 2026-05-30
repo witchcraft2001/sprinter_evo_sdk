@@ -356,6 +356,153 @@ restore_next:
 ; -------------------------------------------------------------------------
 restore_one_16x16:
         ld      e, a                    ; E = PORT_Y
+        .if UNROLL
+        ; --- 16 rows unrolled: HL = mirror/VRAM column (constant), E = PORT_Y++. ---
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        inc     e
+        ld      a, e
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (hl), a
+        ld      b, b
+        ret
+        .else
         ld      c, #16                  ; rows left
 restore_row:
         ld      a, e
@@ -370,6 +517,7 @@ restore_row:
         dec     c
         jr      nz, restore_row
         ret
+        .endif
 
 ; -------------------------------------------------------------------------
 ; blit_one_16x16: HL = source (WIN1 sprite cell), DE = VRAM dest, A = PORT_Y.
@@ -379,6 +527,171 @@ restore_row:
 ; -------------------------------------------------------------------------
 blit_one_16x16:
         ld      b, a                    ; B = PORT_Y
+        .if UNROLL
+        ; --- 16 rows unrolled. Within a 256-byte sprite cell the source low byte
+        ;     is 0,16,..,240 with H constant, so set L directly per row (no add/
+        ;     carry/inc h). DE (dest) is constant; B = PORT_Y++. ---
+        ld      l, #0
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #16
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #32
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #48
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #64
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #80
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #96
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #112
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #128
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #144
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #160
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #176
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #192
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #208
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #224
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        inc     b
+        ld      l, #240
+        ld      a, b
+        out     (#0x89), a
+        ld      d, d
+        ld      a, #16
+        ld      l, l
+        ld      a, (hl)
+        ld      (de), a
+        ld      b, b
+        ret
+        .else
         ld      c, #16                  ; rows left
 blit_row:
         ld      a, b
@@ -399,6 +712,7 @@ blit_src_ok:
         dec     c
         jr      nz, blit_row
         ret
+        .endif
 
 ; -------------------------------------------------------------------------
 ; accel_copy_row_320: HL = source, DE = dest (both within the current PORT_Y
