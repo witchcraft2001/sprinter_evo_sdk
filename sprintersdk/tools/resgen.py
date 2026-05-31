@@ -106,6 +106,63 @@ def parse_compile_bat(path: Path) -> tuple[dict[str, list[tuple[str, Path]]], Pa
     return entries, soundfx
 
 
+# Sprinter-only graphics overrides: `set sprinter_image.N=file`,
+# `sprinter_palette.N`, `sprinter_sprite.N`. They swap the FILE packed for the
+# Sprinter target (e.g. a 256-colour version) while the identifier and ID stay
+# from the base `image.N`/etc. declaration -- so resources.h and main.c are
+# identical on Evo and Sprinter. Evo's tools never see `sprinter_*` (its var
+# scan is by the bare `image`/`palette`/`sprite` prefix). Returns a dict keyed
+# by the base var name, e.g. {"image.0": Path(...)}.
+SPRINTER_OVERRIDE_KEYS = {
+    "sprinter_image": "image",
+    "sprinter_palette": "palette",
+    "sprinter_sprite": "sprite",
+    "sprinter_sprites": "sprite",
+}
+
+
+def parse_palette_base(path: Path) -> dict[str, int]:
+    """`set palette_base.N=B` -> {N: B}. Declares that the Sprinter override for
+    image.N/palette.N keeps the base 16-colour palette at indices 0..15 and places
+    its own (richer) colours starting at palette index B (>=16). Keyed by the bare
+    suffix N so it applies to both image.N and palette.N. Evo ignores it."""
+    out: dict[str, int] = {}
+    for line in decode_text(path).splitlines():
+        if re.match(r"^\s*rem(?:\s|$)", line, re.IGNORECASE):
+            continue
+        match = SET_RE.match(line)
+        if not match:
+            continue
+        key, suffix, value = match.group(1).lower(), match.group(2), strip_bat_value(match.group(3))
+        if key != "palette_base" or suffix is None or not value:
+            continue
+        try:
+            out[suffix.lower()] = int(value, 0)
+        except ValueError:
+            warn(f"palette_base.{suffix}: invalid index '{value}' (ignored)")
+    return out
+
+
+def parse_sprinter_overrides(path: Path) -> dict[str, Path]:
+    base = path.parent
+    overrides: dict[str, Path] = {}
+    for line in decode_text(path).splitlines():
+        if re.match(r"^\s*rem(?:\s|$)", line, re.IGNORECASE):
+            continue
+        match = SET_RE.match(line)
+        if not match:
+            continue
+        key, suffix, value = match.group(1).lower(), match.group(2), strip_bat_value(match.group(3))
+        if suffix is None or not value:
+            continue
+        base_type = SPRINTER_OVERRIDE_KEYS.get(key)
+        if base_type is None:
+            continue
+        normalized = value.replace("\\", os.sep).replace("/", os.sep)
+        overrides[f"{base_type}.{suffix}".lower()] = base / normalized
+    return overrides
+
+
 def resource_name(path: Path) -> str:
     name = path.name
     stem = name.rsplit(".", 1)[0] if "." in name else name

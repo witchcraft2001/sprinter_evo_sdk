@@ -25,10 +25,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn, decode_text
+    from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
+                        resource_name, bmp_sprite_count, warn, decode_text)
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from resgen import parse_compile_bat, resource_name, bmp_sprite_count, warn, decode_text
+    from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
+                        resource_name, bmp_sprite_count, warn, decode_text)
+
+import tempfile
+
+# Lazily-created scratch dir for palette_base reserved-layout BMPs (process-lived).
+_RESERVED_TMPDIR: Path | None = None
 
 
 TYPE_PAL = 0
@@ -44,6 +51,12 @@ HEADER_FMT = "<IHHI4x"
 RECORD_FMT = "<BBHHHII"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
+
+# Sprite transparency threshold: a cell pixel >= this index is baked to 0xFF
+# (HW-transparent on #5C). Default 16 = the EvoSDK 16-colour convention (colours
+# 0..15, everything above transparent). --pal256 sets it to 255 so 256-colour
+# sprites use colours 0..254 with only index 255 transparent (§9.1).
+SPRITE_TRANSPARENT_MIN = 16
 DEFAULT_PT3_PLAYER = Path(__file__).resolve().parent.parent / "pt3play.asm"
 DEFAULT_AFX_PLAYER = Path(__file__).resolve().parent.parent / "ayfxplay.asm"
 
@@ -201,7 +214,7 @@ def pack_sprites(path: Path, base_id: int) -> tuple[list[Record], int]:
         for y in range(16):
             for x in range(16):
                 pixel = pixels[(sy + y) * width + sx + x]
-                payload[y * 16 + x] = 0xFF if pixel >= 16 else pixel
+                payload[y * 16 + x] = 0xFF if pixel >= SPRITE_TRANSPARENT_MIN else pixel
 
         name = sheet_name if index == 0 else f"{sheet_name}_{index}"
         records.append(Record(TYPE_SPR, sprite_id, 16, 16, 0, bytes(payload), name))
@@ -374,8 +387,111 @@ def pack_soundfx_afx(path: Path) -> bytes:
     return data
 
 
+def _write_indexed_bmp(path: Path, w: int, h: int, idx_pixels, palette256) -> None:
+    """Write a standard 8bpp BMP: 256-entry BGR0 palette + bottom-up indexed rows."""
+    row = ((8 * w + 31) // 32) * 4
+    pix_off = 14 + 40 + 256 * 4
+    img = row * h
+    out = bytearray()
+    out += b"BM" + struct.pack("<IHHI", pix_off + img, 0, 0, pix_off)
+    out += struct.pack("<IiiHHIIiiII", 40, w, h, 1, 8, 0, img, 2835, 2835, 256, 0)
+    pal = list(palette256) + [(0, 0, 0)] * (256 - len(palette256))
+    for (r, g, b) in pal[:256]:
+        out += bytes((b, g, r, 0))
+    pad = row - w
+    for sy in range(h):
+        y = h - 1 - sy                      # bottom-up
+        out += bytes(idx_pixels[y * w + x] for x in range(w)) + bytes(pad)
+    path.write_bytes(out)
+
+
+def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int) -> Path:
+    """Build an 8bpp BMP whose palette is [base 16-colour palette at 0..15] +
+    [override image's colours at base_index..255], with the override's pixels
+    remapped accordingly (§9.1 palette partitioning). Colours beyond the 256-
+    base_index budget are merged into their nearest kept colour (least-frequent
+    first). Returns the path to a temp BMP. Dimensions follow the override."""
+    global _RESERVED_TMPDIR
+    if _RESERVED_TMPDIR is None:
+        _RESERVED_TMPDIR = Path(tempfile.mkdtemp(prefix="evos_palbase_"))
+
+    base_pal, _bp, _bw, _bh, _bb = read_bmp(base_path)        # base 16-colour palette
+    opal, opix, w, h, _ob = read_bmp(override_path)
+    px = [opal[i] for i in opix]                              # per-pixel RGB
+
+    budget = 256 - base_index                                # photo colour slots
+    if budget < 1:
+        raise SystemExit(f"assetpack: palette_base {base_index} leaves no room for {override_path.name}")
+    cnt: dict = {}
+    for c in px:
+        cnt[c] = cnt.get(c, 0) + 1
+    remap: dict = {}
+    colors = list(cnt)
+    while len(colors) > budget:                              # merge least-frequent -> nearest
+        colors.sort(key=lambda c: cnt[c])
+        victim = colors[0]
+        best = min(colors[1:], key=lambda c: (c[0]-victim[0])**2 + (c[1]-victim[1])**2 + (c[2]-victim[2])**2)
+        remap[victim] = best
+        cnt[best] += cnt[victim]
+        del cnt[victim]
+        colors = list(cnt)
+
+    def resolve(c):
+        while c in remap:
+            c = remap[c]
+        return c
+
+    photo = list(cnt)
+    pidx = {c: base_index + i for i, c in enumerate(photo)}
+    palette = list(base_pal[:16]) + [(0, 0, 0)] * (base_index - 16) + photo
+    idx_pixels = bytes(pidx[resolve(c)] for c in px)
+
+    out = _RESERVED_TMPDIR / f"{override_path.stem}_b{base_index}.bmp"
+    _write_indexed_bmp(out, w, h, idx_pixels, palette)
+    return out
+
+
+def apply_sprinter_overrides(entries: dict, manifest: Path) -> None:
+    """Swap base graphics files for their `sprinter_<type>.N` overrides in place
+    (§9.1). Keeps order/count/IDs (resources.h is unchanged), only the packed
+    pixels differ. Sprite overrides must keep the base cell count or SPR_ ids
+    would diverge from resources.h -- such an override is rejected with a warning.
+    """
+    overrides = parse_sprinter_overrides(manifest)
+    if not overrides:
+        return
+    pal_base = parse_palette_base(manifest)          # {suffix N: base index}
+    for kind in ("palette", "image", "sprite"):
+        resolved = []
+        for var_name, path in entries[kind]:
+            ov = overrides.get(var_name)
+            if ov is None:
+                resolved.append((var_name, path))
+                continue
+            if not ov.exists():
+                raise SystemExit(f"assetpack: sprinter override {var_name} -> {ov} not found")
+            if kind == "sprite":
+                base_n, _ = bmp_sprite_count(path)
+                ov_n, _ = bmp_sprite_count(ov)
+                if base_n is not None and ov_n != base_n:
+                    warn(f"sprinter_sprite override '{ov.name}' has {ov_n} cells vs base "
+                         f"'{path.name}' {base_n}; SPR_ ids would diverge -- override ignored")
+                    resolved.append((var_name, path))
+                    continue
+            # palette_base.N: keep the base 16-colour palette at 0..15 and place
+            # the override's richer colours at [B..255] (§9.1 partitioning), so the
+            # game's UI/fill/sprites (indices 0..15) survive a 256-colour background.
+            suffix = var_name.split(".", 1)[1] if "." in var_name else ""
+            base_index = pal_base.get(suffix)
+            if base_index is not None and kind in ("palette", "image"):
+                ov = _reserved_layout_bmp(path, ov, base_index)
+            resolved.append((var_name, ov))
+        entries[kind] = resolved
+
+
 def make_records(manifest: Path) -> list[Record]:
     entries, soundfx = parse_compile_bat(manifest)
+    apply_sprinter_overrides(entries, manifest)
     records: list[Record] = []
 
     for rid, (_var, path) in enumerate(entries["palette"]):
@@ -505,6 +621,7 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
     """Return (metadata_blob, page_data). page_data is num_pages*16KB in the
     region order gfx|spr|pal|mus|smp|sfx; metadata page indices are global."""
     entries, soundfx = parse_compile_bat(manifest)
+    apply_sprinter_overrides(entries, manifest)
     color_keys = parse_color_keys(manifest)
 
     # --- tiles: concatenate every image's tiles, 256 tiles (16KB) per page ---
@@ -634,7 +751,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("-o", "--output", type=Path, default=Path("assets.dat"), help="output bundle")
     parser.add_argument("--paged", action="store_true",
                         help="emit the EVP1 paged bundle for the PRELOAD loader")
+    parser.add_argument("--pal256", action="store_true",
+                        help="256-colour sprites: only index 255 is transparent "
+                             "(colours 0..254), instead of the 16-colour >=16 rule")
     args = parser.parse_args(argv)
+
+    if args.pal256:
+        global SPRITE_TRANSPARENT_MIN
+        SPRITE_TRANSPARENT_MIN = 255
 
     if args.paged:
         write_paged_bundle(args.manifest, args.output)

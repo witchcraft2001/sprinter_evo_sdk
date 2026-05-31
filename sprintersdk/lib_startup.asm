@@ -12,6 +12,7 @@
 
         .globl  _evo_runtime_init
         .globl  _evo_runtime_shutdown
+        .globl  _time_counter           ; frame counter low byte (lib_input mouse poll gate)
 
         .globl  _memset
         .globl  _memcpy
@@ -560,6 +561,8 @@ fill_row_320:
 ;  Direct writes therefore update both offsets, not VRAM page #55.
 ; -------------------------------------------------------------------------
 _pal_clear::
+        xor     a
+        ld      (_active_pal_is256), a  ; cleared palette uses the 16-colour path
         ld      hl, #_palette
         ld      b, #16
         xor     a
@@ -605,7 +608,19 @@ _pal_bright::
         ld      a, #6
 1$:
         ld      (_pal_bright_level), a
+        ld      a, (_active_pal_is256)
+        or      a
+        jr      nz, pal_bright_256
         jp      apply_palette_all
+pal_bright_256:
+        ; 256-colour fade: re-read the active palette asset and re-apply it
+        ; scaled by the new brightness (no 256-entry SRAM buffer needed).
+        ld      a, (_active_pal_id)
+        call    map_palette_page        ; HL = payload, WIN1 saved
+        call    apply_palette_256
+        ld      a, (_pal_saved_win1)
+        out     (#0xA2), a              ; restore WIN1
+        ret
 
 _pal_col::
         ld      hl, #2
@@ -619,6 +634,8 @@ _pal_col::
         ld      hl, #_palette
         add     hl, bc
         ld      (hl), a                 ; store color into _palette[id]
+        xor     a
+        ld      (_active_pal_is256), a  ; back to the 16-colour display path
         jp      apply_palette_all       ; re-apply whole palette
 
 _pal_custom::
@@ -631,6 +648,8 @@ _pal_custom::
         ld      de, #_palette
         ld      bc, #16
         ldir
+        xor     a
+        ld      (_active_pal_is256), a  ; back to the 16-colour display path
         jp      apply_palette_all
 
 _pal_copy::
@@ -653,12 +672,29 @@ _pal_select::
         ld      hl, #2
         add     hl, sp
         ld      a, (hl)                 ; palette id
+        ld      (_active_pal_id), a     ; remember for pal_bright re-apply
         call    map_palette_page        ; HL = payload in WIN1, WIN1 saved
+        ; payload = [u16 count][...]; count high byte != 0  =>  256-colour
+        inc     hl
+        ld      a, (hl)                 ; count high byte
+        dec     hl                      ; HL back to payload[0]
+        or      a
+        jr      nz, pal_select_256
+        ; --- 16-colour path (RGB222), unchanged ---
+        xor     a
+        ld      (_active_pal_is256), a
         ld      de, #_palette
         call    copy_palette_payload
         ld      a, (_pal_saved_win1)
         out     (#0xA2), a              ; restore WIN1
         jp      apply_palette_all
+pal_select_256:
+        ld      a, #1
+        ld      (_active_pal_is256), a
+        call    apply_palette_256       ; HL = payload; writes all 256 entries
+        ld      a, (_pal_saved_win1)
+        out     (#0xA2), a              ; restore WIN1
+        ret
 
 copy_palette_payload:
         ; In: HL = EVOS PAL payload ([u16 count][count*(R,G,B)]),
@@ -785,6 +821,82 @@ write_palette_entry:
         pop     bc
         ret
 
+; apply_palette_256: write all 256 palette entries (§9.1, 256-colour path).
+;   In: HL = EVOS PAL payload ([u16 count][256*(R8,G8,B8)]) mapped in WIN1.
+;   Each 6-bit channel (R8>>2) is scaled by the current brightness through
+;   bright6_table (7*64, same curve as pal_bright_table). Writes both palette
+;   banks at PORT_Y = index, WIN3 = #50. Caller restores WIN1.
+apply_palette_256:
+        push    ix
+        push    hl
+        pop     ix
+        inc     ix
+        inc     ix                      ; IX = first RGB triple (skip count)
+        ; _bright6_base = bright6_table + level*64
+        ld      a, (_pal_bright_level)
+        ld      l, a
+        ld      h, #0
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl
+        add     hl, hl                  ; *64
+        ld      de, #bright6_table
+        add     hl, de
+        ld      (_bright6_base), hl
+        in      a, (#0xE2)
+        ld      (_pal_saved_win3), a
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a              ; WIN3 = #50 for #C3Ex
+        ld      c, #0                   ; palette index 0..255
+pal256_loop:
+        ld      a, c
+        out     (#0x89), a              ; PORT_Y = index
+        ld      a, 0 (ix)               ; R8
+        srl     a
+        srl     a                       ; v6 = R8>>2
+        call    bright6_lookup
+        ld      (#0xC3E0), a
+        ld      (#0xC3E4), a
+        ld      a, 1 (ix)               ; G8
+        srl     a
+        srl     a
+        call    bright6_lookup
+        ld      (#0xC3E1), a
+        ld      (#0xC3E5), a
+        ld      a, 2 (ix)               ; B8
+        srl     a
+        srl     a
+        call    bright6_lookup
+        ld      (#0xC3E2), a
+        ld      (#0xC3E6), a
+        xor     a
+        ld      (#0xC3E3), a
+        ld      (#0xC3E7), a
+        inc     ix
+        inc     ix
+        inc     ix                      ; next RGB triple
+        inc     c
+        ld      a, c
+        or      a
+        jr      nz, pal256_loop         ; 256 entries (C wraps 255 -> 0)
+        ld      a, #0xC0
+        out     (#0x89), a
+        ld      a, (_pal_saved_win3)
+        out     (#0xE2), a
+        pop     ix
+        ret
+
+; bright6_lookup: A (0..63) -> A = bright6_table[_bright6_base + A]. Clobbers HL/DE.
+bright6_lookup:
+        ld      l, a
+        ld      h, #0
+        ld      de, (_bright6_base)
+        add     hl, de
+        ld      a, (hl)
+        ret
+
 ; -------------------------------------------------------------------------
 ;  EVP1 paged asset access (HW_NOTES §9.2, §15). The loader copied the EVP1
 ;  header+metadata to EVO_META (#1B00, SRAM). Tables are ID-indexed; access is
@@ -857,6 +969,47 @@ pal_bright_table:
         .db     168, 196, 224, 252
         .db     252, 252, 252, 252
 
+; bright6_table: brightness 0..6, 6-bit channel value 0..63, pre-shifted RGB6<<2.
+; The 256-colour fade path (apply_palette_256) indexes [level*64 + v6]. Generated
+; to reproduce pal_bright_table exactly at the 2-bit anchors (v=0,21,42,63):
+;   level<=3: q = v*level/3 ;  level>3: q = v + (63-v)*(level-3)/3 ;  out = q<<2.
+bright6_table:
+        ; brightness 0
+        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+        ; brightness 1
+        .db       0,  0,  0,  4,  4,  4,  8,  8,  8, 12, 12, 12, 16, 16, 16, 20
+        .db      20, 20, 24, 24, 24, 28, 28, 28, 32, 32, 32, 36, 36, 36, 40, 40
+        .db      40, 44, 44, 44, 48, 48, 48, 52, 52, 52, 56, 56, 56, 60, 60, 60
+        .db      64, 64, 64, 68, 68, 68, 72, 72, 72, 76, 76, 76, 80, 80, 80, 84
+        ; brightness 2
+        .db       0,  0,  4,  8,  8, 12, 16, 16, 20, 24, 24, 28, 32, 32, 36, 40
+        .db      40, 44, 48, 48, 52, 56, 56, 60, 64, 64, 68, 72, 72, 76, 80, 80
+        .db      84, 88, 88, 92, 96, 96,100,104,104,108,112,112,116,120,120,124
+        .db     128,128,132,136,136,140,144,144,148,152,152,156,160,160,164,168
+        ; brightness 3
+        .db       0,  4,  8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60
+        .db      64, 68, 72, 76, 80, 84, 88, 92, 96,100,104,108,112,116,120,124
+        .db     128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188
+        .db     192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252
+        ; brightness 4
+        .db      84, 84, 88, 92, 92, 96,100,100,104,108,108,112,116,116,120,124
+        .db     124,128,132,132,136,140,140,144,148,148,152,156,156,160,164,164
+        .db     168,172,172,176,180,180,184,188,188,192,196,196,200,204,204,208
+        .db     212,212,216,220,220,224,228,228,232,236,236,240,244,244,248,252
+        ; brightness 5
+        .db     168,168,168,172,172,172,176,176,176,180,180,180,184,184,184,188
+        .db     188,188,192,192,192,196,196,196,200,200,200,204,204,204,208,208
+        .db     208,212,212,212,216,216,216,220,220,220,224,224,224,228,228,228
+        .db     232,232,232,236,236,236,240,240,240,244,244,244,248,248,248,252
+        ; brightness 6
+        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
+        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
+        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
+        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
+
         .area   _SDKDATA
         ; SDK mutable data, in the SRAM region (#1600). Saved video mode for the
         ; exit trampoline lives in SRAM #1AC8 (loader-filled), read by the
@@ -873,6 +1026,15 @@ _palette:
         .db     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 _pal_bright_level:
         .db     0
+; Active display palette tracking for the 256-colour path (§9.1). pal_select
+; records which predefined palette is shown and whether it is 256-colour, so
+; pal_bright can re-apply it (256-colour fade re-reads the asset, not a buffer).
+_active_pal_id:
+        .db     0
+_active_pal_is256:
+        .db     0
+_bright6_base:                          ; bright6_table + level*64 (256-colour apply)
+        .dw     0
 _pal_saved_win3:
         .db     0
 _vram_saved_win3:

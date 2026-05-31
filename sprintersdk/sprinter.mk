@@ -35,6 +35,12 @@ PACK_ASSETS ?= 0
 # (as-z80-2.9.0 has no -D; conditional assembly via `.if UNROLL`). See §8/CLAUDE.md.
 UNROLL ?= 0
 UNROLL_STAMP ?= $(BUILD)/unroll.stamp
+# PAL256=1: 256-colour sprites (only index 255 transparent). Default 0 keeps the
+# 16-colour rule (>=16 transparent). 256-colour palettes themselves are detected
+# automatically by the SDK from the asset (no flag) -- this only affects sprite
+# transparency packing. See §9.1.
+PAL256 ?= 0
+PAL256_STAMP ?= $(BUILD)/pal256.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
 CP866_SRC_DIR ?= $(BUILD)/src-cp866
@@ -85,8 +91,14 @@ $(CP866_STAMP): $(PROJECT_TEXT_SRCS) $(RESOURCES_H) $(TRANSCODE_SOURCES) | $(BUI
 	$(PYTHON) $(TRANSCODE_SOURCES) $(PROJECT) $(CP866_SRC_DIR) --encoding cp866
 	@printf '%s\n' 'encoding=cp866' > $@
 
-$(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) $(PT3_PLAYER) $(AFX_PLAYER) | $(BUILD)
-	SJASMPLUS="$(SJASMPLUS)" PT3_PLAYER="$(PT3_PLAYER)" AFX_PLAYER="$(AFX_PLAYER)" $(PYTHON) $(ASSETPACK) --paged $(MANIFEST) -o $@
+ifeq ($(PAL256),1)
+PAL256_ARGS := --pal256
+else
+PAL256_ARGS :=
+endif
+
+$(ASSETS_DAT): $(MANIFEST) $(ASSETPACK) $(PT3_PLAYER) $(AFX_PLAYER) $(PAL256_STAMP) | $(BUILD)
+	SJASMPLUS="$(SJASMPLUS)" PT3_PLAYER="$(PT3_PLAYER)" AFX_PLAYER="$(AFX_PLAYER)" $(PYTHON) $(ASSETPACK) --paged $(PAL256_ARGS) $(MANIFEST) -o $@
 
 ifeq ($(PACK_ASSETS),1)
 DSS_PACK_ARGS := --pack --mhmt $(MHMT)
@@ -104,6 +116,11 @@ $(PACK_STAMP): FORCE | $(BUILD)
 $(UNROLL_STAMP): FORCE | $(BUILD)
 	@tmp="$@.tmp"; \
 	printf '%s\n' 'UNROLL=$(UNROLL)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
+$(PAL256_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'PAL256=$(PAL256)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---

@@ -1,18 +1,18 @@
 @echo off
 
-rem имя SCL файла
+rem РёРјСЏ SCL С„Р°Р№Р»Р°
 
 set output=xnx.scl
 
-rem сообщение, которое отображается при загрузке
-rem 32 символа, стандартный шрифт
+rem СЃРѕРѕР±С‰РµРЅРёРµ, РєРѕС‚РѕСЂРѕРµ РѕС‚РѕР±СЂР°Р¶Р°РµС‚СЃСЏ РїСЂРё Р·Р°РіСЂСѓР·РєРµ
+rem 32 СЃРёРјРІРѕР»Р°, СЃС‚Р°РЅРґР°СЂС‚РЅС‹Р№ С€СЂРёС„С‚
 
 set title=" XNX IS LOADING"
 
-rem список изображений, откуда брать палитры
-rem в программе они вызываются по автоматически генерируемым
-rem идентификаторам в файле resources.h
-rem нумерация после точки должна быть возрастающей
+rem СЃРїРёСЃРѕРє РёР·РѕР±СЂР°Р¶РµРЅРёР№, РѕС‚РєСѓРґР° Р±СЂР°С‚СЊ РїР°Р»РёС‚СЂС‹
+rem РІ РїСЂРѕРіСЂР°РјРјРµ РѕРЅРё РІС‹Р·С‹РІР°СЋС‚СЃСЏ РїРѕ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РіРµРЅРµСЂРёСЂСѓРµРјС‹Рј
+rem РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂР°Рј РІ С„Р°Р№Р»Рµ resources.h
+rem РЅСѓРјРµСЂР°С†РёСЏ РїРѕСЃР»Рµ С‚РѕС‡РєРё РґРѕР»Р¶РЅР° Р±С‹С‚СЊ РІРѕР·СЂР°СЃС‚Р°СЋС‰РµР№
 
 set palette.0=gfx\title.bmp
 set palette.1=gfx\textback1.bmp
@@ -29,7 +29,7 @@ set palette.17=gfx\pic8.bmp
 set palette.18=gfx\pic9.bmp
 set palette.19=gfx\pic10.bmp
 
-rem список изображений, откуда брать графику
+rem СЃРїРёСЃРѕРє РёР·РѕР±СЂР°Р¶РµРЅРёР№, РѕС‚РєСѓРґР° Р±СЂР°С‚СЊ РіСЂР°С„РёРєСѓ
 
 set image.0=gfx\title.bmp
 set image.1=gfx\font816.bmp
@@ -48,18 +48,52 @@ set image.17=gfx\pic8.bmp
 set image.18=gfx\pic9.bmp
 set image.19=gfx\pic10.bmp
 
-rem спрайты
+rem Sprinter-only РїРѕР»РЅРѕС†РІРµС‚РЅС‹Рµ РІРµСЂСЃРёРё РєР°СЂС‚РёРЅРѕРє (РѕРІРµСЂСЂР°Р№РґС‹ Р±Р°Р·РѕРІС‹С… pic*)
+set sprinter_palette.10=gfx\sp_pic1.bmp
+set sprinter_image.10=gfx\sp_pic1.bmp
+set sprinter_palette.11=gfx\sp_pic2.bmp
+set sprinter_image.11=gfx\sp_pic2.bmp
+set sprinter_palette.16=gfx\sp_pic7.bmp
+set sprinter_image.16=gfx\sp_pic7.bmp
+set sprinter_palette.17=gfx\sp_pic8.bmp
+set sprinter_image.17=gfx\sp_pic8.bmp
+set sprinter_palette.18=gfx\sp_pic9.bmp
+set sprinter_image.18=gfx\sp_pic9.bmp
+set sprinter_palette.19=gfx\sp_pic10.bmp
+set sprinter_image.19=gfx\sp_pic10.bmp
+set sprinter_palette.12=gfx\sp_pic3.bmp
+set sprinter_image.12=gfx\sp_pic3.bmp
+set sprinter_palette.13=gfx\sp_pic4.bmp
+set sprinter_image.13=gfx\sp_pic4.bmp
+set sprinter_palette.14=gfx\sp_pic5.bmp
+set sprinter_image.14=gfx\sp_pic5.bmp
+set sprinter_palette.15=gfx\sp_pic6.bmp
+set sprinter_image.15=gfx\sp_pic6.bmp
+
+rem Sprinter: РїРѕР»РЅРѕС†РІРµС‚РЅС‹Рµ С„РѕРЅС‹ РґРµР»СЏС‚ РїР°Р»РёС‚СЂСѓ СЃ UI вЂ” Р±Р°Р·Р° (16 С†РІ.) РІ 0..15, С„РѕС‚Рѕ РІ 16..255
+set palette_base.10=16
+set palette_base.11=16
+set palette_base.16=16
+set palette_base.17=16
+set palette_base.18=16
+set palette_base.19=16
+set palette_base.12=16
+set palette_base.13=16
+set palette_base.14=16
+set palette_base.15=16
+
+rem СЃРїСЂР°Р№С‚С‹
 
 set sprites.0=gfx\player.bmp
 set sprites.1=gfx\titlemask.bmp
 set sprites.2=gfx\spikeball.bmp
 
-rem набор звуковых эффектов, если нужен
-rem он может быть только один
+rem РЅР°Р±РѕСЂ Р·РІСѓРєРѕРІС‹С… СЌС„С„РµРєС‚РѕРІ, РµСЃР»Рё РЅСѓР¶РµРЅ
+rem РѕРЅ РјРѕР¶РµС‚ Р±С‹С‚СЊ С‚РѕР»СЊРєРѕ РѕРґРёРЅ
 
 set soundfx=sfx\sounds.afb
 
-rem музыка, нужное число треков
+rem РјСѓР·С‹РєР°, РЅСѓР¶РЅРѕРµ С‡РёСЃР»Рѕ С‚СЂРµРєРѕРІ
 
 set music.0=mus\intro.pt3
 set music.1=mus\level.pt3
@@ -67,7 +101,7 @@ set music.2=mus\gameover.pt3
 set music.3=mus\welldone.pt3
 set music.10=mus\loop1.pt3
 
-rem сэмплы
+rem СЃСЌРјРїР»С‹
 
 set sample.0=sfx\start.wav
 set sample.1=sfx\meow.wav
