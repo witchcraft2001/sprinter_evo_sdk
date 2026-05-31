@@ -228,6 +228,40 @@ _quit_to_dss::
 ;   set_im1/RestorePages, titd RESTORE_IM1_DSS. See HW_NOTES exit notes.)
 _evo_runtime_shutdown::
         di
+        ; Silence sound before returning to DSS, otherwise the last PT3 note keeps
+        ; sounding on the AY and the CBL FIFO keeps draining. IM2 is off now (DI),
+        ; so nothing rewrites these. Port I/O is paging-independent. L holds the
+        ; exit code -- not touched here (only A/BC).
+        ;   AY: select reg via #FFFD, write data via #BFFD. R7 mixer = all
+        ;   tone/noise off; R8/R9/R10 volumes = 0 (silence each channel).
+        ld      bc, #0xFFFD
+        ld      a, #7
+        out     (c), a
+        ld      b, #0xBF
+        ld      a, #0x3F
+        out     (c), a                  ; mixer: tone+noise disabled
+        ld      b, #0xFF
+        ld      a, #8
+        out     (c), a
+        ld      b, #0xBF
+        xor     a
+        out     (c), a                  ; volume A = 0
+        ld      b, #0xFF
+        ld      a, #9
+        out     (c), a
+        ld      b, #0xBF
+        xor     a
+        out     (c), a                  ; volume B = 0
+        ld      b, #0xFF
+        ld      a, #10
+        out     (c), a
+        ld      b, #0xBF
+        xor     a
+        out     (c), a                  ; volume C = 0
+        ; CBL: stop the FIFO controller (#004E) so a half-played sample halts.
+        ld      bc, #0x004E
+        xor     a
+        out     (c), a
         ; Launcher runs in SRAM (CACHE on): stash exit code + the saved video
         ; mode and DSS page numbers (read from SRAM) into WIN2 DRAM, copy the
         ; trampoline to WIN2, run. The trampoline can't read SRAM (cache off).
