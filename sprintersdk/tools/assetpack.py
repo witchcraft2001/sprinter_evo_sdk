@@ -60,10 +60,12 @@ SPRITE_TRANSPARENT_MIN = 16
 DEFAULT_PT3_PLAYER = Path(__file__).resolve().parent.parent / "pt3play.asm"
 DEFAULT_AFX_PLAYER = Path(__file__).resolve().parent.parent / "ayfxplay.asm"
 
-# Hardware-keyed flag stored in bit 15 of the IMG meta base_tile field.
-# select_image masks it off (tile space stays 0..0x7FFF -- ample: game_xnx
-# tops out near 10584). When set, draw_tile_key uses the WIN3=#58 HW path.
-HW_KEYED_FLAG = 0x8000
+# Hardware-keyed flag, stored in bit 0 of the IMG meta record's dedicated flags
+# byte (the 5th byte). When set, draw_tile_key uses the WIN3=#58 HW path. Kept
+# OUT of base_tile: the old "bit 15 of base_tile" scheme capped image tile space
+# at 0x8000 and SILENTLY corrupted any image past it (robo's later MAIN frames
+# wrapped to tile 168/1168 -> garbage). base_tile is now a full u16.
+IMG_FLAG_HW_KEYED = 0x01
 
 COLOR_KEY_RE = re.compile(
     r"^\s*set\s+color_key\.(\w+)\s*=\s*(\d+)", re.IGNORECASE
@@ -591,7 +593,8 @@ def write_bundle(records: list[Record], output: Path) -> None:
 #      u16 sprite_count
 #      pad to 16
 #    metadata blob (-> RAM):
-#      u8 img_count;  img_count  * { u16 base_tile, u8 w_tiles, u8 h_tiles }
+#      u8 img_count;  img_count  * { u16 base_tile, u8 w_tiles, u8 h_tiles, u8 flags }
+#                     flags bit0 = hw_keyed (#58 path). base_tile is a full u16.
 #      u8 pal_count;  pal_count  * { u8 page, u16 offset }
 #      u8 mus_count;  mus_count  * { u8 page, u16 offset, u16 len }
 #      u8 smp_count;  smp_count  * { u8 page, u16 offset, u16 len, u8 cbl }
@@ -608,8 +611,14 @@ def write_bundle(records: list[Record], output: Path) -> None:
 # =========================================================================
 
 PAGE = 16384
-EVP_MAGIC = b"EVP1"
+# EVP2 (was EVP1): the IMG meta record gained a flags byte (4 -> 5 bytes), moving
+# the hw_keyed flag out of base_tile. The magic bump makes a stale EVP1 bundle
+# fail loudly at dss_exe time instead of being misread under the new layout.
+EVP_MAGIC = b"EVP2"
 EVP_HEADER_SIZE = 16
+# Asset phys-page table in SDK SRAM is 200 entries (loader.asm EVO_PAGE_TABLE,
+# #1A00..#1AC7). A bundle with more pages would overflow it into saved-state.
+EVP_MAX_PAGES = 200
 
 
 def _pad_to_page(blob: bytearray) -> None:
@@ -626,25 +635,26 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     # --- tiles: concatenate every image's tiles, 256 tiles (16KB) per page ---
     gfx = bytearray()
-    img_table: list[tuple[int, int, int]] = []      # (base_tile, w_tiles, h_tiles)
+    img_table: list[tuple[int, int, int, int]] = []  # (base_tile, w_tiles, h_tiles, flags)
     for var_name, path in entries["image"]:
         suffix = var_name.split(".", 1)[1] if "." in var_name else ""
         key = color_keys.get(suffix)               # K if declared color_key.N=K
         payload, w, h = pack_image(path, remap_key=key)
         base_tile = len(gfx) // 64
-        if key is not None:
-            # Tag hw_keyed in bit 15 of base_tile (select_image masks it off).
-            if base_tile >= HW_KEYED_FLAG:
-                raise SystemExit(
-                    f"assetpack: {path}: base_tile {base_tile} >= 0x8000, no room "
-                    "for the hw_keyed flag bit"
-                )
-            base_tile |= HW_KEYED_FLAG
-        # base_tile is u16 (global tile index, EvoSDK IMGLIST.tile). w/h tiles
-        # are u8 like makeresh: only used by draw_image, which can't exceed the
-        # 40x32 screen anyway. Big tilesheets (e.g. an 1x258 mask strip) are
-        # drawn by tile index, so clamp their unused dims rather than wrap.
-        img_table.append((base_tile, min(w // 8, 255), min(h // 8, 255)))
+        # base_tile is a full u16 global tile index (EvoSDK IMGLIST.tile). The
+        # hw_keyed flag rides a SEPARATE flags byte now, so the whole u16 range
+        # is usable (capped in practice by the 200-page table -> ~51200 tiles).
+        if base_tile > 0xFFFF:
+            raise SystemExit(
+                f"assetpack: {path}: base_tile {base_tile} exceeds u16 -- too "
+                "much image tile data"
+            )
+        flags = IMG_FLAG_HW_KEYED if key is not None else 0
+        # w/h tiles are u8 like makeresh: only used by draw_image, which can't
+        # exceed the 40x32 screen anyway. Big tilesheets (e.g. an 1x258 mask
+        # strip) are drawn by tile index, so clamp their unused dims rather than
+        # wrap. h is no longer overloaded -- a clamped 255 is just a value now.
+        img_table.append((base_tile, min(w // 8, 255), min(h // 8, 255), flags))
         gfx += payload
     _pad_to_page(gfx)
     gfx_pages = len(gfx) // PAGE
@@ -701,12 +711,17 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     page_data = bytes(gfx + spr + pal_blob + mus_blob + smp_blob + sfx_blob)
     num_pages = len(page_data) // PAGE
+    if num_pages > EVP_MAX_PAGES:
+        raise SystemExit(
+            f"assetpack: bundle needs {num_pages} pages, exceeds the "
+            f"{EVP_MAX_PAGES}-entry page table -- too many assets"
+        )
 
     # --- metadata blob ---
     meta = bytearray()
     meta.append(len(img_table))
-    for base_tile, wt, ht in img_table:
-        meta += struct.pack("<HBB", base_tile, wt, ht)
+    for base_tile, wt, ht, flags in img_table:
+        meta += struct.pack("<HBBB", base_tile, wt, ht, flags)
     meta.append(len(pal_tab))
     for page, off, _ln in pal_tab:
         meta += struct.pack("<BH", page, off)
@@ -741,7 +756,7 @@ def write_paged_bundle(manifest: Path, output: Path) -> None:
     tmp.write_bytes(head_meta + page_data)
     tmp.replace(output)
     num_pages = page_data and len(page_data) // PAGE or 0
-    print(f"assetpack: wrote {output} (EVP1, {num_pages} pages, "
+    print(f"assetpack: wrote {output} (EVP2, {num_pages} pages, "
           f"meta {len(head_meta) - EVP_HEADER_SIZE} B)")
 
 

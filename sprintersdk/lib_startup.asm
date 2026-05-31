@@ -936,7 +936,7 @@ bright6_lookup:
 ;  header+metadata to EVO_META (#1B00, SRAM). Tables are ID-indexed; access is
 ;  O(1): table_base + id*stride, then map one page into WIN1.
 ;
-;  EVO_META layout: [16B EVP1 header][u8 img_count][img*4]
+;  EVO_META layout: [16B EVP2 header][u8 img_count][img*5]
 ;                   [u8 pal_count][pal*3:{u8 page,u16 off}][...]
 ;  Fixed: img_count @ EVO_META+16, img table @ +17. pal table base depends on
 ;  img_count -> computed once by evo_meta_init.
@@ -946,12 +946,15 @@ EVO_META_IMGCNT = 0x1B10                ; EVO_META + 16
 EVO_IMG_TABLE   = 0x1B11                ; EVO_META + 17
 
 evo_meta_init:
-        ; _pal_base = EVO_IMG_TABLE + img_count*4 + 1 (skip pal_count byte)
+        ; _pal_base = EVO_IMG_TABLE + img_count*5 + 1 (skip pal_count byte)
         ld      a, (EVO_META_IMGCNT)
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = img_count
         add     hl, hl
         add     hl, hl                  ; img_count*4
+        add     hl, de                  ; img_count*5
         ld      de, #EVO_IMG_TABLE
         add     hl, de                  ; -> pal_count byte
         inc     hl                      ; -> pal table

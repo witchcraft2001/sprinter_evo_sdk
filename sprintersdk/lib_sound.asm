@@ -27,7 +27,7 @@
 
 EVO_PAGE_TABLE  = 0x1A00                ; loader-filled phys page table
 EVO_META_IMGCNT = 0x1B10                ; EVO_META + 16
-EVO_IMG_TABLE   = 0x1B11                ; img records: u16 base, u8 wt, u8 ht
+EVO_IMG_TABLE   = 0x1B11                ; img records: u16 base, u8 wt, u8 ht, u8 flags
 
 SLOT3       = 0xE2
 CBL_CTRL    = 0x004E
@@ -102,8 +102,8 @@ _music_stop::
 
 ; -------------------------------------------------------------------------
 ; sample_play(u8 sample)
-; EVP1 sample table layout:
-;   [img_count][img*4][pal_count][pal*3][mus_count][mus*5]
+; EVP2 sample table layout:
+;   [img_count][img*5][pal_count][pal*3][mus_count][mus*5]
 ;   [smp_count][smp*6:{u8 logical_page,u16 off,u16 len,u8 cbl}]
 ; Streams len bytes, then enough #80 silence to align to 128 plus one full
 ; FIFO (256 bytes). Samples may cross 16K logical pages.
@@ -209,8 +209,11 @@ sample_record_a:
         ld      a, (EVO_META_IMGCNT)
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = img_count
         add     hl, hl
         add     hl, hl                  ; img_count*4
+        add     hl, de                  ; img_count*5
         ld      de, #EVO_IMG_TABLE
         add     hl, de                  ; -> pal_count
 
@@ -247,8 +250,11 @@ music_record_a:
         ld      a, (EVO_META_IMGCNT)
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = img_count
         add     hl, hl
         add     hl, hl                  ; img_count*4
+        add     hl, de                  ; img_count*5
         ld      de, #EVO_IMG_TABLE
         add     hl, de                  ; -> pal_count
 
@@ -277,8 +283,11 @@ sfx_record:
         ld      a, (EVO_META_IMGCNT)
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = img_count
         add     hl, hl
         add     hl, hl                  ; img_count*4
+        add     hl, de                  ; img_count*5
         ld      de, #EVO_IMG_TABLE
         add     hl, de                  ; -> pal_count
 

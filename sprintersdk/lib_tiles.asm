@@ -34,7 +34,7 @@
 ;     and lib_startup.asm. ---
 EVO_PAGE_TABLE = 0x1A00                 ; phys page numbers, index = logical page
 EVO_IMG_TABLE  = 0x1B11                 ; EVO_META(#1B00)+16 hdr +1 img_count byte
-                                        ; records: { u16 base_tile, u8 wt, u8 ht }
+                                        ; records: { u16 base_tile, u8 wt, u8 ht, u8 flags }
 VRAM_PAGE      = 0x50                    ; VRAM + DRAM mirror (read = mirror)
 VRAM_BUF0_BASE = 0xC000
 VRAM_BUF1_BASE = 0xC140
@@ -49,20 +49,19 @@ _select_image::
         add     hl, sp
         ld      a, (hl)                 ; image id
 select_image_a:
-        ; record = EVO_IMG_TABLE + id*4
+        ; record = EVO_IMG_TABLE + id*5: { u16 base_tile, u8 wt, u8 ht, u8 flags }
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = id
         add     hl, hl
         add     hl, hl                  ; id*4
+        add     hl, de                  ; id*5
         ld      de, #EVO_IMG_TABLE
         add     hl, de
         ld      e, (hl)
         inc     hl
-        ld      d, (hl)                 ; de = base_tile (bit15 = hw_keyed flag)
-        ld      a, d
-        and     #0x80                   ; bit 15 -> hw_keyed (0x80 / 0)
-        ld      (_image_hw_keyed), a
-        res     7, d                    ; mask flag -> real base_tile
+        ld      d, (hl)                 ; de = base_tile (full u16, flag is elsewhere)
         ld      (_image_base_tile), de
         inc     hl
         ld      a, (hl)                 ; w in tiles
@@ -70,6 +69,10 @@ select_image_a:
         inc     hl
         ld      a, (hl)                 ; h in tiles
         ld      (_image_height_tiles), a
+        inc     hl
+        ld      a, (hl)                 ; flags byte
+        and     #0x01                   ; bit0 -> hw_keyed (1 / 0)
+        ld      (_image_hw_keyed), a
         ld      a, #1
         ld      (_image_selected), a
         ret

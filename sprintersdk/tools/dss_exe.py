@@ -37,7 +37,9 @@ MINIHDR_FLAG_PACKED = 0x01
 # NUL-padded, so it is also NUL-terminated for the loader's puts). MUST match
 # TITLE_LEN in loader.asm.
 MONOBLOCK_TITLE_LEN = 32
-EVP_MAGIC = b"EVP1"
+# EVP2: IMG meta records are 5 bytes (base_tile, w, h, flags). EVP1 bundles use
+# the old 4-byte record and must be rejected so they aren't misread.
+EVP_MAGIC = b"EVP2"
 EVP_HEADER_SIZE = 16
 # SDK SRAM table region (loader.asm EVO_*): #1A00 page table (200 B, #1A00-#1AC7) /
 # #1AC8 vmode / #1B00 EVP1 meta, up to the stack at #2000. SDK code+data must stay
@@ -220,7 +222,8 @@ def parse_evp1(bundle: bytes) -> tuple[bytes, list[bytes]]:
     copied to EVO_META. Data pages map 1:1 to physical pages via the page table.
     """
     if bundle[:4] != EVP_MAGIC:
-        raise SystemExit("dss_exe: --assets is not an EVP1 paged bundle (run assetpack --paged)")
+        raise SystemExit("dss_exe: --assets is not an EVP2 paged bundle (rebuild with "
+                         "assetpack --paged; a stale EVP1 bundle is no longer accepted)")
     # EVP1 header (assetpack write_paged_bundle): magic[0:4], num_pages[4],
     # gfx_pages[5], meta_off[6:8], meta_size[8:10], pages_off[10:12], sprite_count[12:14].
     num_pages = bundle[4]
