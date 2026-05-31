@@ -24,6 +24,7 @@
         .globl  _delay
         .globl  _pal_clear
         .globl  _pal_bright
+        .globl  _pal_bright_fine
         .globl  _pal_select
         .globl  _pal_copy
         .globl  _pal_col
@@ -656,6 +657,56 @@ pal_bright_256:
         out     (#0xA2), a              ; restore WIN1
         ret
 
+; pal_bright_fine(u8 level): fine-grained brightness, level = 0..32 (32 = normal,
+; full colour; 0 = black). Sprinter-only extension for smooth fades -- the coarse
+; pal_bright(0..6) gives only 4 steps in the fade range, which bands visibly on
+; 256-colour photos. level gives 32 linear steps. For a 256-colour palette each
+; 6-bit channel is scaled by level/32 (built into a 64-byte table, no per-entry
+; multiply); for a 16-colour palette level maps to the nearest coarse level (flat
+; art needs no finer fade). Public pal_bright / BRIGHT_* macros are unchanged.
+_pal_bright_fine::
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)                 ; level (0..32)
+        cp      #33
+        jr      c, 1$
+        ld      a, #32
+1$:
+        ld      (_fine_bright_level), a
+        ld      a, (_active_pal_is256)
+        or      a
+        jr      nz, pal_bright_fine_256
+        ; 16-colour: coarse = round(level*3/32) = (level*3+16)>>5, then reuse path
+        ld      a, (_fine_bright_level)
+        ld      l, a
+        ld      h, #0
+        ld      d, h
+        ld      e, a
+        add     hl, hl
+        add     hl, de                  ; level*3
+        ld      de, #16
+        add     hl, de                  ; level*3+16
+        srl     h
+        rr      l
+        srl     h
+        rr      l
+        srl     h
+        rr      l
+        srl     h
+        rr      l
+        srl     h
+        rr      l                       ; >>5 -> L = 0..3
+        ld      a, l
+        ld      (_pal_bright_level), a
+        jp      apply_palette_all
+pal_bright_fine_256:
+        ld      a, (_active_pal_id)
+        call    map_palette_page        ; HL = payload, WIN1 saved
+        call    apply_palette_256_fine
+        ld      a, (_pal_saved_win1)
+        out     (#0xA2), a              ; restore WIN1
+        ret
+
 _pal_col::
         ld      hl, #2
         add     hl, sp
@@ -861,12 +912,10 @@ write_palette_entry:
 ;   bright6_table (7*64, same curve as pal_bright_table). Writes both palette
 ;   banks at PORT_Y = index, WIN3 = #50. Caller restores WIN1.
 apply_palette_256:
-        push    ix
-        push    hl
-        pop     ix
-        inc     ix
-        inc     ix                      ; IX = first RGB triple (skip count)
-        ; _bright6_base = bright6_table + level*64
+        ; coarse path: scale table = bright6_table[level*64] (handles overbright
+        ; levels 4..6 too). _bright6_base set, then run the shared writer.
+        ; HL = payload on entry -- preserve it, the run stage sets IX from it.
+        push    hl                      ; save payload pointer
         ld      a, (_pal_bright_level)
         ld      l, a
         ld      h, #0
@@ -879,6 +928,53 @@ apply_palette_256:
         ld      de, #bright6_table
         add     hl, de
         ld      (_bright6_base), hl
+        pop     hl                      ; HL = payload again
+        jr      apply_palette_256_run
+
+apply_palette_256_fine:
+        ; fine path: build a 64-byte scale table for the current fine level
+        ; (channel v6 -> (v6*level/32)<<2), point _bright6_base at it, then run
+        ; the same writer. v6*level is accumulated (no multiply): acc starts at 16
+        ; (the rounding bias) and += level each step; out = (acc>>3) & 0xFC.
+        ; In: HL = payload. Both HL (payload) and IX (caller's frame pointer --
+        ; SDCC treats IX as callee-saved) MUST survive: building the scale table
+        ; clobbers IX, and the shared writer restores whatever IX it sees on
+        ; entry, so we hand it back the caller's IX here.
+        push    ix                      ; save caller IX (frame pointer)
+        push    hl                      ; save payload pointer
+        ld      hl, #fine_scale_table
+        ld      (_bright6_base), hl
+        ld      ix, #fine_scale_table
+        ld      a, (_fine_bright_level)
+        ld      e, a
+        ld      d, #0                   ; de = level (per-step increment)
+        ld      hl, #16                 ; acc = v6*level + 16 (starts at v6=0)
+        ld      b, #64
+fine_scale_loop:
+        push    hl
+        srl     h
+        rr      l
+        srl     h
+        rr      l
+        srl     h
+        rr      l                       ; hl = acc >> 3
+        ld      a, l
+        and     #0xFC                   ; (acc>>5)<<2 == (acc>>3)&0xFC
+        ld      (ix), a
+        inc     ix
+        pop     hl
+        add     hl, de                  ; acc += level
+        djnz    fine_scale_loop
+        pop     hl                      ; HL = payload again
+        pop     ix                      ; IX = caller frame pointer again
+        ; fall through to the shared writer
+
+apply_palette_256_run:
+        push    ix
+        push    hl
+        pop     ix
+        inc     ix
+        inc     ix                      ; IX = first RGB triple (skip count)
         in      a, (#0xE2)
         ld      (_pal_saved_win3), a
         ld      a, #VRAM_PAGE
@@ -1010,6 +1106,10 @@ pal_bright_table:
 ; The 256-colour fade path (apply_palette_256) indexes [level*64 + v6]. Generated
 ; to reproduce pal_bright_table exactly at the 2-bit anchors (v=0,21,42,63):
 ;   level<=3: q = v*level/3 ;  level>3: q = v + (63-v)*(level-3)/3 ;  out = q<<2.
+; q is ROUNDED half-up (not floored): floor sent weak channels (v6<=1 at level 2,
+; v6<=2 at level 1) to black a whole fade step early, so muted/near-neutral pixels
+; visibly extinguished before brighter-channel neighbours of similar luma. Rounding
+; is exact at the anchors, so the 16-colour path / existing games are unaffected.
 bright6_table:
         ; brightness 0
         .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
@@ -1017,30 +1117,30 @@ bright6_table:
         .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
         .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
         ; brightness 1
-        .db       0,  0,  0,  4,  4,  4,  8,  8,  8, 12, 12, 12, 16, 16, 16, 20
-        .db      20, 20, 24, 24, 24, 28, 28, 28, 32, 32, 32, 36, 36, 36, 40, 40
-        .db      40, 44, 44, 44, 48, 48, 48, 52, 52, 52, 56, 56, 56, 60, 60, 60
-        .db      64, 64, 64, 68, 68, 68, 72, 72, 72, 76, 76, 76, 80, 80, 80, 84
+        .db       0,  0,  4,  4,  4,  8,  8,  8, 12, 12, 12, 16, 16, 16, 20, 20
+        .db      20, 24, 24, 24, 28, 28, 28, 32, 32, 32, 36, 36, 36, 40, 40, 40
+        .db      44, 44, 44, 48, 48, 48, 52, 52, 52, 56, 56, 56, 60, 60, 60, 64
+        .db      64, 64, 68, 68, 68, 72, 72, 72, 76, 76, 76, 80, 80, 80, 84, 84
         ; brightness 2
-        .db       0,  0,  4,  8,  8, 12, 16, 16, 20, 24, 24, 28, 32, 32, 36, 40
-        .db      40, 44, 48, 48, 52, 56, 56, 60, 64, 64, 68, 72, 72, 76, 80, 80
-        .db      84, 88, 88, 92, 96, 96,100,104,104,108,112,112,116,120,120,124
-        .db     128,128,132,136,136,140,144,144,148,152,152,156,160,160,164,168
+        .db       0,  4,  4,  8, 12, 12, 16, 20, 20, 24, 28, 28, 32, 36, 36, 40
+        .db      44, 44, 48, 52, 52, 56, 60, 60, 64, 68, 68, 72, 76, 76, 80, 84
+        .db      84, 88, 92, 92, 96,100,100,104,108,108,112,116,116,120,124,124
+        .db     128,132,132,136,140,140,144,148,148,152,156,156,160,164,164,168
         ; brightness 3
         .db       0,  4,  8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60
         .db      64, 68, 72, 76, 80, 84, 88, 92, 96,100,104,108,112,116,120,124
         .db     128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188
         .db     192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252
         ; brightness 4
-        .db      84, 84, 88, 92, 92, 96,100,100,104,108,108,112,116,116,120,124
-        .db     124,128,132,132,136,140,140,144,148,148,152,156,156,160,164,164
-        .db     168,172,172,176,180,180,184,188,188,192,196,196,200,204,204,208
-        .db     212,212,216,220,220,224,228,228,232,236,236,240,244,244,248,252
+        .db      84, 88, 88, 92, 96, 96,100,104,104,108,112,112,116,120,120,124
+        .db     128,128,132,136,136,140,144,144,148,152,152,156,160,160,164,168
+        .db     168,172,176,176,180,184,184,188,192,192,196,200,200,204,208,208
+        .db     212,216,216,220,224,224,228,232,232,236,240,240,244,248,248,252
         ; brightness 5
-        .db     168,168,168,172,172,172,176,176,176,180,180,180,184,184,184,188
-        .db     188,188,192,192,192,196,196,196,200,200,200,204,204,204,208,208
-        .db     208,212,212,212,216,216,216,220,220,220,224,224,224,228,228,228
-        .db     232,232,232,236,236,236,240,240,240,244,244,244,248,248,248,252
+        .db     168,168,172,172,172,176,176,176,180,180,180,184,184,184,188,188
+        .db     188,192,192,192,196,196,196,200,200,200,204,204,204,208,208,208
+        .db     212,212,212,216,216,216,220,220,220,224,224,224,228,228,228,232
+        .db     232,232,236,236,236,240,240,240,244,244,244,248,248,248,252,252
         ; brightness 6
         .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
         .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
@@ -1063,6 +1163,10 @@ _palette:
         .db     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 _pal_bright_level:
         .db     0
+_fine_bright_level:                             ; fine brightness 0..32 (32 = normal)
+        .db     32
+fine_scale_table:                          ; 64-byte channel scale built per fade step
+        .ds     64
 ; Active display palette tracking for the 256-colour path (§9.1). pal_select
 ; records which predefined palette is shown and whether it is 256-colour, so
 ; pal_bright can re-apply it (256-colour fade re-reads the asset, not a buffer).

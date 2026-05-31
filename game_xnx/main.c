@@ -355,11 +355,21 @@ void fade_to_black(void)
 {
 	static u8 i,j;
 
+#ifdef __SPRINTER__
+	// 256-цветные заставки бандят на 4-уровневом pal_bright; pal_bright_fine даёт
+	// 32 линейных шага -> плавный фейд. 16 шагов 30..0, ~как по времени.
+	for(i=1;i<=16;++i)
+	{
+		pal_bright_fine(32-(i<<1));
+		delay(1);
+	}
+#else
 	for(i=1;i<3;++i)
 	{
 		pal_bright(BRIGHT_MID-i);
 		delay(5);
 	}
+#endif
 }
 
 

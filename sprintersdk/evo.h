@@ -172,6 +172,12 @@ void pal_clear(void) _naked;
 
 void pal_bright(u8 bright) _naked;
 
+//Sprinter-расширение: тонкая яркость level=0..32 (32=норма, 0=чёрный). Даёт 32
+//линейных шага в диапазоне затемнения вместо 4 у pal_bright(0..6) — для плавного
+//фейда 256-цветных изображений без бандинга. Только под __SPRINTER__.
+
+void pal_bright_fine(u8 level) _naked;
+
 //выбор предопределённой палитры по номеру
 
 void pal_select(u8 id) _naked;
