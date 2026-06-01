@@ -38,8 +38,13 @@ EVO_IMG_TABLE  = 0x1B11                 ; EVO_META(#1B00)+16 hdr +1 img_count by
 VRAM_PAGE      = 0x50                    ; VRAM + DRAM mirror (read = mirror)
 VRAM_BUF0_BASE = 0xC000
 VRAM_BUF1_BASE = 0xC140
-VRAM_Y_OFFSET  = 28
+        .if NATIVE
+VRAM_Y_OFFSET  = 0                      ; native: full 320x256 surface, no centering
+TILE_DIRTY_ROWS  = 32                   ; 256px / 8
+        .else
+VRAM_Y_OFFSET  = 28                     ; compat: centre the 200-row EvoSDK surface
 TILE_DIRTY_ROWS  = 25                   ; 200px / 8
+        .endif
 TILE_DIRTY_STRIDE = 5                   ; 40 cells / 8 bits
 
         .area   _SDK
@@ -145,8 +150,8 @@ draw_tile_setup:
         ld      a, b
         add     a, a
         add     a, a
-        add     a, a                    ; y*8 (pixel row in the 320x200 surface)
-        add     a, #28                  ; +28: center surface in the 256-row frame
+        add     a, a                    ; y*8 (pixel row in the surface)
+        add     a, #VRAM_Y_OFFSET       ; centre offset (28 compat / 0 native)
         ld      (_draw_y), a
 
         ; global tile = base_tile + tile

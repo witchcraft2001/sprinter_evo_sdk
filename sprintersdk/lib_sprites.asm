@@ -40,12 +40,25 @@ VRAM_PAGE      = 0x50                    ; write VRAM + DRAM mirror (background)
 VRAM_PAGE_SPR  = 0x5C                    ; transparent + VRAM-only (sprites)
 VRAM_BUF0_BASE = 0xC000
 VRAM_BUF1_BASE = 0xC140
-VRAM_Y_OFFSET  = 28                      ; center the 200-row EvoSDK surface
+        .if NATIVE
+VRAM_Y_OFFSET  = 0                       ; native: full 320x256 surface, no centering
+SURFACE_ROWS   = 256
+        .else
+VRAM_Y_OFFSET  = 28                      ; compat: centre the 200-row EvoSDK surface
+SURFACE_ROWS   = 200
+        .endif
+; Sprite X is a full 16-bit value in both modes (set_sprite takes u16 x). Compat
+; stores 0..152 and the byte dest offset is x*2 (XSHIFT=1, EvoSDK 2px granularity);
+; native stores 0..319 and the offset is x (XSHIFT=0, per-pixel over the full width).
+; The `.if NATIVE` blocks below pick the shift; X clipping is one 16-bit compare.
+QSTRIDE        = 5                       ; queue record: idh, idl, y, xlo, xhi
+SSTRIDE        = 4                       ; saved rect:   valid, py, xlo, xhi
 
 ; -------------------------------------------------------------------------
-; void set_sprite(u8 id, u8 x, u8 y, u16 spr)
-; Queue format matches EvoSDK: idh, idl, y, x. SPRITE_END is idh=#FF.
-; X is in 2-pixel units, Y is in pixels.
+; void set_sprite(u8 id, u16 x, u8 y, u16 spr)
+; Queue record (QSTRIDE=5): idh, idl, y, xlo, xhi. SPRITE_END is idh=#FF.
+; X is 16-bit: compat = 2-pixel units (0..152), native = pixels (0..319). Y in pixels.
+; Args on stack (ascending): id @0, x @1-2, y @3, spr @4-5.
 ; -------------------------------------------------------------------------
 _set_sprite::
         push    iy
@@ -56,21 +69,27 @@ _set_sprite::
         and     #0x3F
         ld      l, a
         ld      h, #0
+        ld      d, h
+        ld      e, a                    ; de = id
         add     hl, hl
-        add     hl, hl                  ; id * 4
+        add     hl, hl                  ; id*4
+        add     hl, de                  ; id*5 (QSTRIDE)
         ld      de, #_sprqueue
         add     hl, de
 
-        ld      a, 4 (iy)               ; spr high
+        ld      a, 5 (iy)               ; spr high -> idh
         ld      (hl), a
         inc     hl
-        ld      a, 3 (iy)               ; spr low
+        ld      a, 4 (iy)               ; spr low  -> idl
         ld      (hl), a
         inc     hl
-        ld      a, 2 (iy)               ; y
+        ld      a, 3 (iy)               ; y
         ld      (hl), a
         inc     hl
-        ld      a, 1 (iy)               ; x
+        ld      a, 1 (iy)               ; x low
+        ld      (hl), a
+        inc     hl
+        ld      a, 2 (iy)               ; x high
         ld      (hl), a
 
         pop     iy
@@ -87,17 +106,17 @@ _sprites_start::
         xor     a
         ld      (_sprites_active), a
 
-        ; clear sprite queue to end markers
+        ; clear sprite queue to end markers (64 * QSTRIDE = 320 bytes -> all idh=#FF)
         ld      hl, #_sprqueue
         ld      de, #_sprqueue + 1
-        ld      bc, #255
+        ld      bc, #64 * QSTRIDE - 1
         ld      (hl), #0xFF
         ldir
 
-        ; clear all per-buffer saved-rect structs (valid/x/py, both buffers)
+        ; clear all per-buffer saved-rect structs (64 slots * SSTRIDE * 2 buffers)
         ld      hl, #_spr_saved
         ld      de, #_spr_saved + 1
-        ld      bc, #383
+        ld      bc, #64 * SSTRIDE * 2 - 1
         ld      (hl), #0
         ldir
 
@@ -125,8 +144,12 @@ sprites_start_row:
         pop     hl
         pop     af
         inc     a
-        cp      #VRAM_Y_OFFSET + 200
+        .if NATIVE
+        jr      nz, sprites_start_row        ; full 256 rows: A wraps 255 -> 0
+        .else
+        cp      #VRAM_Y_OFFSET + SURFACE_ROWS ; compat: 28..228 (200 rows)
         jr      nz, sprites_start_row
+        .endif
 
         ld      a, #0xC0
         out     (#0x89), a
@@ -183,8 +206,8 @@ render_base_ok:
 ; the main registers).
         call    saved_base_hl           ; HL = saved-struct base for this buffer
         push    hl
-        pop     ix                      ; IX = saved struct (advances +3 / sprite)
-        ld      iy, #_sprqueue          ; IY = queue entry (advances +4 / sprite)
+        pop     ix                      ; IX = saved struct (advances +SSTRIDE / sprite)
+        ld      iy, #_sprqueue          ; IY = queue entry (advances +QSTRIDE / sprite)
         ld      a, #VRAM_PAGE_SPR
         out     (#0xE2), a
 
@@ -192,25 +215,36 @@ draw_loop:
         ld      a, 0 (iy)               ; idh, #FF = end of queue
         cp      #0xFF
         jp      z, draw_done
-        ld      a, 3 (iy)               ; x (2-pixel units)
-        cp      #153                    ; x*2 >= 306 -> +16 > 320: skip
-        jr      nc, draw_skip
+
+        ; x_px = x << XSHIFT (HL); clip if x_px + 16 > 320 (i.e. x_px >= 305)
+        ld      l, 3 (iy)               ; x low
+        ld      h, 4 (iy)               ; x high
+        .if NATIVE
+        .else
+        add     hl, hl                  ; compat: x*2 (2-pixel units)
+        .endif
+        push    hl                      ; keep x_px (back-buffer byte offset)
+        ld      de, #305
+        or      a
+        sbc     hl, de                  ; CF set (borrow) if x_px < 305 -> on screen
+        pop     hl                      ; HL = x_px (flags from sbc preserved)
+        jr      nc, draw_skip           ; x_px >= 305 -> off right edge, skip
+
         ld      a, 2 (iy)               ; y
         add     a, #VRAM_Y_OFFSET       ; py
         cp      #241                    ; py + 16 > 256: skip
         jr      nc, draw_skip
 
-        ld      2 (ix), a               ; saved py
+        ld      1 (ix), a               ; saved py
         ld      b, a                    ; B = py (PORT_Y for blit)
         ld      a, #1
         ld      0 (ix), a               ; saved valid = 1
-        ld      a, 3 (iy)               ; x
-        ld      1 (ix), a               ; saved x
+        ld      a, 3 (iy)
+        ld      2 (ix), a               ; saved x low
+        ld      a, 4 (iy)
+        ld      3 (ix), a               ; saved x high
 
-        ; dest = back-buffer base + x*2
-        ld      l, a
-        ld      h, #0
-        add     hl, hl
+        ; dest = back-buffer base + x_px (HL already = x_px)
         ld      de, (_spr_base)
         add     hl, de
         push    hl                      ; dest (blit wants it in DE)
@@ -242,16 +276,16 @@ draw_loop:
         call    blit_one_16x16
 
 draw_next:
-        ld      bc, #3
+        ld      bc, #SSTRIDE
         add     ix, bc                  ; next saved struct
-        ld      bc, #4
+        ld      bc, #QSTRIDE
         add     iy, bc                  ; next queue entry
         jp      draw_loop
 
 draw_skip:
-        ld      bc, #3                  ; out of range: leave valid (already 0)
+        ld      bc, #SSTRIDE            ; out of range: leave valid (already 0)
         add     ix, bc
-        ld      bc, #4
+        ld      bc, #QSTRIDE
         add     iy, bc
         jp      draw_loop
 
@@ -313,19 +347,20 @@ restore_after_base_ok:
 
 ; -------------------------------------------------------------------------
 ; saved_base_hl: HL = base of the saved-rect struct array for the current back
-; buffer (_spr_back). Buffer 1 is offset by 64 slots * 3 bytes = 192.
+; buffer (_spr_back). Buffer 1 is offset by 64 slots * SSTRIDE bytes.
 ; -------------------------------------------------------------------------
 saved_base_hl:
         ld      hl, #_spr_saved
         ld      a, (_spr_back)
         or      a
         ret     z
-        ld      hl, #_spr_saved + 192
+        ld      hl, #_spr_saved + 64 * SSTRIDE
         ret
 
 ; restore_saved_rects: IX = saved struct base. For each of 64 slots with valid=1,
 ; copy its 16x16 background back from the mirror and clear valid. B = counter.
 ; restore_one_16x16 preserves B and IX; _spr_base gives the buffer base.
+; Saved rect = { valid(0), py(1), xlo(2), xhi(3) }.
 restore_saved_rects:
         ld      b, #64
 restore_loop:
@@ -334,16 +369,18 @@ restore_loop:
         jr      z, restore_next
         xor     a
         ld      0 (ix), a               ; consume (valid = 0)
-        ld      a, 1 (ix)               ; x
-        ld      l, a
-        ld      h, #0
-        add     hl, hl                  ; x*2
+        ld      l, 2 (ix)               ; x low
+        ld      h, 3 (ix)               ; x high
+        .if NATIVE
+        .else
+        add     hl, hl                  ; compat: x*2
+        .endif
         ld      de, (_spr_base)
-        add     hl, de                  ; HL = VRAM column
-        ld      a, 2 (ix)               ; py
+        add     hl, de                  ; HL = VRAM column (x_px)
+        ld      a, 1 (ix)               ; py
         call    restore_one_16x16
 restore_next:
-        ld      de, #3
+        ld      de, #SSTRIDE
         add     ix, de                  ; next saved struct
         djnz    restore_loop
         ret
@@ -758,10 +795,10 @@ _spr_back:
         .db     0
 _spr_base:
         .dw     0
-; Per-buffer saved sprite rects -- one struct per slot: { valid, x, py } (3 B).
-; Buffer 0 = slots [0..63] at +0, buffer 1 = slots [0..63] at +192. Walked with
+; Per-buffer saved sprite rects -- one struct per slot: { valid, py, xlo, xhi } (SSTRIDE).
+; Buffer 0 = slots [0..63] at +0, buffer 1 = slots [0..63] at +64*SSTRIDE. Walked with
 ; IX in the draw/restore loops (queue ptr is IY, per-sprite temps are registers).
 _spr_saved:
-        .ds     384
+        .ds     64 * SSTRIDE * 2
 _sprqueue:
-        .ds     256
+        .ds     64 * QSTRIDE

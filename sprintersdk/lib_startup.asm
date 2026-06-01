@@ -493,7 +493,11 @@ inc_time_counter:
 VRAM_PAGE       = 0x50
 VRAM_BUF0_BASE  = 0xC000
 VRAM_BUF1_BASE  = 0xC140
-VRAM_Y_OFFSET   = 28                    ; center 200-row Evo surface in 256 rows
+        .if NATIVE
+VRAM_Y_OFFSET   = 0                     ; native: full 320x256 surface (clear fills all 256)
+        .else
+VRAM_Y_OFFSET   = 28                    ; compat: centre 200-row Evo surface in 256 rows
+        .endif
 
 clear_both_buffers_black:
         in      a, (#0xE2)

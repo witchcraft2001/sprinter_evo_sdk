@@ -41,6 +41,13 @@ UNROLL_STAMP ?= $(BUILD)/unroll.stamp
 # transparency packing. See §9.1.
 PAL256 ?= 0
 PAL256_STAMP ?= $(BUILD)/pal256.stamp
+# NATIVE=1: native Sprinter screen -- full 320x256 surface (no centering) and
+# per-pixel sprite X over the full width (0..319, 16-bit X). NATIVE=0 (default) is
+# the EvoSDK-compatible 320x200 surface with 2px sprite X -- existing games unchanged.
+# Prepended as `NATIVE = N` to each SDK .asm (conditional assembly via `.if NATIVE`).
+# See plan.md §9.2 / CLAUDE.md §2 (deliberate coordinate deviation in native mode).
+NATIVE ?= 0
+NATIVE_STAMP ?= $(BUILD)/native.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
 ASSETS_DAT ?= $(BUILD)/assets.dat
 CP866_SRC_DIR ?= $(BUILD)/src-cp866
@@ -59,7 +66,10 @@ PACK_STAMP ?= $(BUILD)/pack.stamp
 # SDK code at #0100 (not #0000: sdld ignores -b base 0; #0000-#00FF is left for
 # the RST/IM2 vectors, used in Phase 2). Still well inside the SRAM region.
 SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
-SDKDATA_LOC ?= 0x1600           # SDK mutable data (_SDKDATA), in SRAM
+# SDK mutable data in SRAM, below the table region (#1A00). Placed at #1400 (the
+# gap above _SDK code, which ends ~#1140) so the larger NATIVE sprite tables
+# (16-bit X queue + saved rects, ~1200 B) still fit under #1A00. Compat unchanged.
+SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
 CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
@@ -123,6 +133,11 @@ $(PAL256_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'PAL256=$(PAL256)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+$(NATIVE_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'NATIVE=$(NATIVE)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
 $(BUILD)/loader.rel: $(LOADER_SRC) | $(BUILD)
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
@@ -163,10 +178,10 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 	cp $@ $(basename $@).o
 
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
-# Prepend `UNROLL = N` so the libs can pick the unrolled vs compact output loops
-# via `.if UNROLL` (as-z80 has no -D). Changing UNROLL re-touches the stamp.
-$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) | $(BUILD)
-	@printf 'UNROLL = %s\n' '$(UNROLL)' > $(BUILD)/$*.gen.asm
+# Prepend `UNROLL = N` and `NATIVE = N` so the libs can select compile-time variants
+# via `.if UNROLL` / `.if NATIVE` (as-z80 has no -D). Changing either re-touches its stamp.
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) | $(BUILD)
+	@printf 'UNROLL = %s\nNATIVE = %s\n' '$(UNROLL)' '$(NATIVE)' > $(BUILD)/$*.gen.asm
 	@cat $< >> $(BUILD)/$*.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o
