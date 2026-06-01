@@ -21,16 +21,17 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 try:
     from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
-                        resource_name, bmp_sprite_count, warn, decode_text)
+                        resource_name, bmp_sprite_count, warn, decode_text, png_ihdr)
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
-                        resource_name, bmp_sprite_count, warn, decode_text)
+                        resource_name, bmp_sprite_count, warn, decode_text, png_ihdr)
 
 import tempfile
 
@@ -144,11 +145,177 @@ def read_bmp(path: Path) -> tuple[list[tuple[int, int, int]], bytes, int, int, i
     return palette, bytes(pixels), width, abs_height, bpp
 
 
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+
+
+def read_png(path: Path) -> tuple[list[tuple[int, int, int]], bytes, int, int, int, bytes]:
+    """Decode a non-interlaced PNG to (palette, index_pixels, w, h, 8, transparent).
+    `transparent` is a w*h bytes mask: 1 = the pixel is not fully opaque (alpha<255)
+    and is baked to 0xFF downstream for hardware transparency. Indexed PNG (colour
+    type 3) keeps its PLTE order (so palette-partitioning / colour_key conventions
+    survive); grey/truecolour PNG builds a palette from its distinct OPAQUE colours
+    (must be <=256 -- no lossy quantisation here)."""
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit(f"assetpack: {path}: not a PNG")
+    pos = 8
+    width = height = bit_depth = colour = interlace = None
+    plte = b""
+    trns: bytes | None = None
+    idat = bytearray()
+    while pos + 8 <= len(data):
+        ln = int.from_bytes(data[pos:pos + 4], "big")
+        typ = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + ln]
+        pos += 12 + ln                          # length(4)+type(4)+data(ln)+crc(4)
+        if typ == b"IHDR":
+            width = int.from_bytes(chunk[0:4], "big")
+            height = int.from_bytes(chunk[4:8], "big")
+            bit_depth, colour, interlace = chunk[8], chunk[9], chunk[12]
+        elif typ == b"PLTE":
+            plte = chunk
+        elif typ == b"tRNS":
+            trns = chunk
+        elif typ == b"IDAT":
+            idat += chunk
+        elif typ == b"IEND":
+            break
+    if width is None:
+        raise SystemExit(f"assetpack: {path}: missing PNG IHDR")
+    if interlace:
+        raise SystemExit(f"assetpack: {path}: interlaced PNG not supported (save non-interlaced)")
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(colour)
+    if channels is None or bit_depth not in (1, 2, 4, 8, 16):
+        raise SystemExit(f"assetpack: {path}: unsupported PNG (colour type {colour}, bit depth {bit_depth})")
+
+    raw = zlib.decompress(bytes(idat))
+    bits_per_pixel = bit_depth * channels
+    stride = (width * bits_per_pixel + 7) // 8
+    bpp = max(1, bits_per_pixel // 8)           # byte step for the filter predictors
+
+    out = bytearray()
+    prev = bytearray(stride)
+    p = 0
+    for _y in range(height):
+        ft = raw[p]; p += 1
+        line = bytearray(raw[p:p + stride]); p += stride
+        if ft == 1:
+            for i in range(stride):
+                line[i] = (line[i] + (line[i - bpp] if i >= bpp else 0)) & 0xFF
+        elif ft == 2:
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ft == 3:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+        elif ft == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                c = prev[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + _paeth(a, prev[i], c)) & 0xFF
+        elif ft != 0:
+            raise SystemExit(f"assetpack: {path}: bad PNG filter type {ft}")
+        out += line
+        prev = line
+
+    maxval = (1 << bit_depth) - 1
+
+    def iter_pixels():
+        for y in range(height):
+            row = out[y * stride:(y + 1) * stride]
+            if bit_depth == 8:
+                k = 0
+                for _x in range(width):
+                    yield row[k:k + channels]; k += channels
+            elif bit_depth == 16:
+                k = 0
+                for _x in range(width):
+                    yield [row[k + c * 2] for c in range(channels)]; k += channels * 2   # high byte
+            else:                                # 1/2/4-bit (indexed or grey, 1 channel)
+                bitpos = 0
+                for _x in range(width):
+                    shift = 8 - bit_depth - (bitpos & 7)
+                    yield [(row[bitpos >> 3] >> shift) & maxval]
+                    bitpos += bit_depth
+
+    pixels = bytearray(width * height)
+    transparent = bytearray(width * height)
+
+    if colour == 3:                              # indexed: keep PLTE order, alpha from tRNS
+        palette = [tuple(plte[i:i + 3]) for i in range(0, len(plte), 3)]
+        idx_alpha = trns if trns is not None else b""
+        for i, s in enumerate(iter_pixels()):
+            v = s[0]
+            pixels[i] = v
+            if v < len(idx_alpha) and idx_alpha[v] < 255:
+                transparent[i] = 1
+        return palette, bytes(pixels), width, height, 8, bytes(transparent)
+
+    # grey / truecolour: collapse distinct opaque colours into a palette (<=256)
+    def scale(v):
+        return v if bit_depth >= 8 else (v * 255 // maxval)
+
+    key = None                                   # tRNS colour key for type 0/2
+    if trns is not None and colour == 0:
+        key = (int.from_bytes(trns[0:2], "big"),)
+    elif trns is not None and colour == 2:
+        key = tuple(int.from_bytes(trns[i:i + 2], "big") for i in (0, 2, 4))
+
+    pal_map: dict = {}
+    palette = []
+    for i, s in enumerate(iter_pixels()):
+        if colour == 0:
+            alpha = 0 if key is not None and (s[0],) == key else 255
+            rgb = (scale(s[0]),) * 3
+        elif colour == 4:
+            alpha = s[1]; rgb = (scale(s[0]),) * 3
+        elif colour == 2:
+            alpha = 0 if key is not None and tuple(s) == key else 255
+            rgb = (scale(s[0]), scale(s[1]), scale(s[2]))
+        else:                                    # colour == 6 (RGBA)
+            alpha = s[3]; rgb = (scale(s[0]), scale(s[1]), scale(s[2]))
+        if alpha < 255:
+            transparent[i] = 1                   # pixels[i] stays 0; baked to 0xFF later
+            continue
+        j = pal_map.get(rgb)
+        if j is None:
+            if len(palette) >= 256:
+                raise SystemExit(f"assetpack: {path}: >256 distinct opaque colours -- "
+                                 "export as an indexed PNG or reduce the colour count")
+            j = len(palette); pal_map[rgb] = j; palette.append(rgb)
+        pixels[i] = j
+    return palette, bytes(pixels), width, height, 8, bytes(transparent)
+
+
+def read_image(path: Path):
+    """Unified reader: BMP or PNG. Returns (palette, pixels, w, h, bpp, transparent),
+    where `transparent` is a w*h 0/1 bytes mask for PNG, or None for BMP (which keeps
+    the legacy index-threshold transparency rule)."""
+    if png_ihdr(path) is not None:
+        return read_png(path)
+    palette, pixels, w, h, bpp = read_bmp(path)
+    return palette, pixels, w, h, bpp, None
+
+
 def pack_palette(path: Path) -> bytes:
-    palette, _pixels, _width, _height, _bpp = read_bmp(path)
+    palette, _pixels, _width, _height, _bpp, _t = read_image(path)
+    # The runtime picks the 256-colour path purely by count >= 256 (high byte != 0);
+    # BMP only ever yields 16 or 256, but a PNG palette can be any size. Pad any
+    # >16-colour palette out to 256 so it takes the 256-colour path (apply_palette_256
+    # writes all 256 entries); 16 or fewer stays on the 16-colour RGB222 path.
+    count = len(palette)
+    if count > 16:
+        palette = list(palette) + [(0, 0, 0)] * (256 - count)
+        count = 256
     payload = bytearray()
-    payload += struct.pack("<H", len(palette))
-    for r, g, b in palette:
+    payload += struct.pack("<H", count)
+    for r, g, b in palette[:count]:
         payload += bytes((r, g, b))
     return bytes(payload)
 
@@ -166,15 +333,25 @@ def parse_color_keys(manifest: Path) -> dict[str, int]:
     return keys
 
 
-def pack_image(path: Path, remap_key: int | None = None) -> tuple[bytes, int, int]:
-    _palette, pixels, width, height, _bpp = read_bmp(path)
+def pack_image(path: Path, remap_key: int | None = None) -> tuple[bytes, int, int, bool]:
+    """Pack an image into 8x8 tiles. Returns (payload, w, h, keyed) where `keyed`
+    is True if the image carries transparency (PNG alpha or a declared color_key)
+    and must be drawn through the HW #58 keyed path (0xFF = transparent)."""
+    _palette, pixels, width, height, _bpp, transparent = read_image(path)
     if (width & 7) or (height & 7):
         raise SystemExit(f"assetpack: {path}: image dimensions must be 8px aligned")
 
+    # HW transparency (#58) only skips 0xFF. Bake transparent pixels to 0xFF so the
+    # runtime can blit via #58 with no CPU compare. Two sources of transparency:
+    #   * PNG alpha: any pixel with alpha<255 (per the `transparent` mask);
+    #   * a declared `color_key.N=K`: palette index K (BMP legacy / extra keying).
+    keyed = False
+    if transparent is not None and any(transparent):
+        pixels = bytes(0xFF if transparent[i] else pixels[i] for i in range(len(pixels)))
+        keyed = True
     if remap_key is not None:
-        # HW transparency (#58) only skips 0xFF. Bake the declared transparent
-        # index to 0xFF so the runtime can blit via #58 with no CPU compare.
         pixels = bytes(0xFF if b == remap_key else b for b in pixels)
+        keyed = True
 
     out = bytearray()
     for ty in range(0, height, 8):
@@ -183,7 +360,7 @@ def pack_image(path: Path, remap_key: int | None = None) -> tuple[bytes, int, in
                 off = (ty + row) * width + tx
                 out += pixels[off:off + 8]
 
-    return bytes(out), width, height
+    return bytes(out), width, height, keyed
 
 
 def pack_sprites(path: Path, base_id: int) -> tuple[list[Record], int]:
@@ -198,7 +375,7 @@ def pack_sprites(path: Path, base_id: int) -> tuple[list[Record], int]:
              f" -- matches resgen; later SPR_ IDs unaffected")
         return [], 0
 
-    _palette, pixels, width, height, _bpp = read_bmp(path)
+    _palette, pixels, width, height, _bpp, transparent = read_image(path)
     sheet_name = resource_name(path)
     records: list[Record] = []
     cols = width // 16
@@ -215,8 +392,15 @@ def pack_sprites(path: Path, base_id: int) -> tuple[list[Record], int]:
         payload = bytearray(16 * 16)
         for y in range(16):
             for x in range(16):
-                pixel = pixels[(sy + y) * width + sx + x]
-                payload[y * 16 + x] = 0xFF if pixel >= SPRITE_TRANSPARENT_MIN else pixel
+                src = (sy + y) * width + sx + x
+                pixel = pixels[src]
+                if transparent is not None:
+                    # PNG: transparency is the alpha mask only (alpha<255 -> 0xFF);
+                    # opaque pixels keep their palette index regardless of value.
+                    payload[y * 16 + x] = 0xFF if transparent[src] else pixel
+                else:
+                    # BMP: legacy index-threshold rule (>=16, or >=255 with --pal256).
+                    payload[y * 16 + x] = 0xFF if pixel >= SPRITE_TRANSPARENT_MIN else pixel
 
         name = sheet_name if index == 0 else f"{sheet_name}_{index}"
         records.append(Record(TYPE_SPR, sprite_id, 16, 16, 0, bytes(payload), name))
@@ -417,8 +601,8 @@ def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int) 
     if _RESERVED_TMPDIR is None:
         _RESERVED_TMPDIR = Path(tempfile.mkdtemp(prefix="evos_palbase_"))
 
-    base_pal, _bp, _bw, _bh, _bb = read_bmp(base_path)        # base 16-colour palette
-    opal, opix, w, h, _ob = read_bmp(override_path)
+    base_pal, _bp, _bw, _bh, _bb, _bt = read_image(base_path)  # base 16-colour palette
+    opal, opix, w, h, _ob, _ot = read_image(override_path)
     px = [opal[i] for i in opix]                              # per-pixel RGB
 
     budget = 256 - base_index                                # photo colour slots
@@ -500,7 +684,7 @@ def make_records(manifest: Path) -> list[Record]:
         records.append(Record(TYPE_PAL, rid, 0, 0, 0, pack_palette(path), resource_name(path)))
 
     for rid, (_var, path) in enumerate(entries["image"]):
-        payload, width, height = pack_image(path)
+        payload, width, height, _keyed = pack_image(path)   # flat bundle: no hw_keyed flag
         records.append(Record(TYPE_IMG, rid, width, height, 0, payload, resource_name(path)))
 
     sprite_id = 0
@@ -639,7 +823,7 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
     for var_name, path in entries["image"]:
         suffix = var_name.split(".", 1)[1] if "." in var_name else ""
         key = color_keys.get(suffix)               # K if declared color_key.N=K
-        payload, w, h = pack_image(path, remap_key=key)
+        payload, w, h, keyed = pack_image(path, remap_key=key)
         base_tile = len(gfx) // 64
         # base_tile is a full u16 global tile index (EvoSDK IMGLIST.tile). The
         # hw_keyed flag rides a SEPARATE flags byte now, so the whole u16 range
@@ -649,7 +833,8 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
                 f"assetpack: {path}: base_tile {base_tile} exceeds u16 -- too "
                 "much image tile data"
             )
-        flags = IMG_FLAG_HW_KEYED if key is not None else 0
+        # hw_keyed if a color_key.N was declared OR the source (PNG) has alpha.
+        flags = IMG_FLAG_HW_KEYED if keyed else 0
         # w/h tiles are u8 like makeresh: only used by draw_image, which can't
         # exceed the 40x32 screen anyway. Big tilesheets (e.g. an 1x258 mask
         # strip) are drawn by tile index, so clamp their unused dims rather than

@@ -185,19 +185,46 @@ def read_u32_le(data: bytes, offset: int) -> int:
     return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def png_ihdr(path: Path) -> tuple[int, int, int, int] | None:
+    """(width, height, bit_depth, colour_type) from a PNG IHDR, or None if not
+    a PNG. Reads only the 8-byte signature + the IHDR chunk (first chunk)."""
+    try:
+        head = path.read_bytes()[:33]
+    except OSError:
+        return None
+    if head[:8] != PNG_SIGNATURE or head[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(head[16:20], "big")
+    height = int.from_bytes(head[20:24], "big")
+    bit_depth = head[24]
+    colour_type = head[25]
+    return width, height, bit_depth, colour_type
+
+
 def bmp_sprite_count(path: Path) -> tuple[int | None, str | None]:
-    """Sprite count of a 16x16-sheet BMP. Returns (count, None) on success,
+    """Sprite count of a 16x16-sheet BMP or PNG. Returns (count, None) on success,
     or (None, reason) when the sheet must be skipped (so the caller can warn:
     skipping shifts the IDs of every later sprite)."""
     if not path.exists():
         return None, "file not found"
+
+    ihdr = png_ihdr(path)
+    if ihdr is not None:
+        width, height, _bd, _ct = ihdr   # all colour types are decoded by assetpack.read_png
+        if (width & 15) or (height & 15):
+            return None, f"size must be a multiple of 16 (got {width}x{height})"
+        return (width >> 4) * (height >> 4), None
+
     try:
         header = path.read_bytes()[:34]
     except OSError as exc:
         return None, f"read error: {exc}"
 
     if len(header) < 34 or header[:2] != b"BM":
-        return None, "not a BMP file"
+        return None, "not a BMP or PNG file"
 
     bpp = read_u16_le(header, 28)
     compression = read_u32_le(header, 30)
