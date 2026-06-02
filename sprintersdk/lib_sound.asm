@@ -22,6 +22,7 @@
         .globl  _music_stop
         .globl  _sample_play
         .globl  _sound_tick
+        .globl  _evo_cbl_irq            ; IM2 #FF vector hook (CBL refill / video IRQ)
 
         .area   _SDK
 
@@ -129,7 +130,7 @@ _sample_play::
         ld      a, (hl)                 ; CBL mode byte (#D9/#DA/#DB)
         or      a
         jr      nz, 1$
-        ld      a, #0xD9                ; defensive default: 11 kHz
+        ld      a, #0x99                ; defensive default: mono 8-bit, INT, 11 kHz
 1$:
         ld      (_cbl_ctrl), a
 
@@ -166,41 +167,87 @@ _sample_play::
         ld      a, (_cbl_ctrl)
         out     (c), a
 
-        in      a, (#0xFE)
-        and     #0x80
-        ld      (_cbl_last_bit7), a
+        ; Arm IRQ-driven streaming: the #FF IM2 vector (_evo_cbl_irq) refills the
+        ; FIFO on each CBL half-empty event (proven HW path, cf. MK_OUTI). The
+        ; blocking foreground HALT-waits until the handler has fed the whole sample
+        ; plus the silence tail, matching EvoSDK's blocking sample_play semantics.
+        ld      a, #1
+        ld      (_cbl_active), a
+        ld      de, #4000               ; anti-hang guard: bail if no IRQ clears it
+        ei
+sample_wait_active:
+        halt
+        ld      a, (_cbl_active)
+        or      a
+        jr      z, sample_wait_done
+        dec     de
+        ld      a, d
+        or      e
+        jr      nz, sample_wait_active
+        xor     a                       ; timeout -> force-stop streaming
+        ld      (_cbl_active), a
+sample_wait_done:
 
-sample_play_loop:
-        ld      hl, (_cbl_sample_remaining)
-        ld      a, h
-        or      l
-        jr      nz, sample_wait_half
-        ld      hl, (_cbl_tail_remaining)
-        ld      a, h
-        or      l
-        jr      z, sample_drain
+        ; Drain: let the last FIFO contents (silence tail) play out, then leave CBL
+        ; in idle mode so video vsync polling (#FE.5) keeps working.
+        ld      b, #4
+sample_drain_halt:
+        halt
+        djnz    sample_drain_halt
 
-sample_wait_half:
-        call    wait_cbl_bit7_toggle
-        call    cbl_stream_128
-        in      a, (#0xFE)              ; our 128 writes flip WA; re-baseline
-        and     #0x80
-        ld      (_cbl_last_bit7), a
-        jr      sample_play_loop
-
-sample_drain:
-        ; Let the final FIFO contents play out, then leave CBL in idle mode so
-        ; video vsync polling (#FE.5) keeps working.
-        call    wait_cbl_bit7_toggle
-        call    wait_cbl_bit7_toggle
         ld      bc, #CBL_CTRL
         ld      a, #CBL_IDLE
         out     (c), a
-
         ld      a, (_cbl_saved_win3)
         out     (#SLOT3), a
-        ei                              ; sample blocked IM2 (DI); restore it
         ret
+
+; _evo_cbl_irq: IM2 vector #FF (shared by the video/keyboard IRQ and CBL). If a
+; sample is streaming and #FE.bit7 (CBL_IND = CNT7^WA7, half-FIFO) is set, this is
+; a CBL half-empty event -> refill 128 bytes; otherwise it is a plain video IRQ ->
+; just ei/reti. WIN3 is saved and remapped to the current sample page around the
+; refill so it is robust against whatever the foreground / other IRQs left there.
+_evo_cbl_irq::
+        push    af
+        ld      a, (_cbl_active)
+        or      a
+        jr      z, cbl_irq_ret          ; no active sample -> plain video IRQ
+        in      a, (#0xFE)
+        and     #0x80
+        jr      z, cbl_irq_ret          ; bit7=0 -> not a CBL half-empty event
+        push    bc
+        push    de
+        push    hl
+        .db     0x08                    ; ex af,af' (cbl_stream_128 uses A')
+        push    af
+        in      a, (#SLOT3)
+        ld      (_cbl_irq_saved_win3), a
+        ld      a, (_cbl_logical_page)
+        call    map_logical_page_win3
+        call    cbl_stream_128
+        ld      a, (_cbl_irq_saved_win3)
+        out     (#SLOT3), a
+        ; sample + tail both drained -> signal the foreground to stop
+        ld      hl, (_cbl_sample_remaining)
+        ld      a, h
+        or      l
+        jr      nz, cbl_irq_busy
+        ld      hl, (_cbl_tail_remaining)
+        ld      a, h
+        or      l
+        jr      nz, cbl_irq_busy
+        xor     a
+        ld      (_cbl_active), a
+cbl_irq_busy:
+        pop     af
+        .db     0x08                    ; ex af,af'
+        pop     hl
+        pop     de
+        pop     bc
+cbl_irq_ret:
+        pop     af
+        ei
+        reti
 
 ; sample_record_a: A = sample id. Out HL = record, carry on missing/out of range.
 sample_record_a:
@@ -379,25 +426,6 @@ cbl_flush_256:
         out     (c), a
         dec     d
         jr      nz, 1$
-        ret
-
-wait_cbl_bit7_toggle:
-        ld      de, #0x4000             ; timeout guard: do not hang forever
-        ld      a, (_cbl_last_bit7)
-        ld      b, a                    ; B = baseline bit7, hoisted out of loop
-1$:
-        in      a, (#0xFE)
-        and     #0x80
-        ld      c, a                    ; C = current bit7
-        cp      b
-        jr      nz, 2$
-        dec     de
-        ld      a, d
-        or      e
-        jr      nz, 1$
-2$:
-        ld      a, c
-        ld      (_cbl_last_bit7), a
         ret
 
 ; Output exactly 128 bytes to CBL_DATA. Sample bytes stream while
@@ -580,5 +608,7 @@ _cbl_saved_win3:
         .db     0
 _cbl_ctrl:
         .db     0
-_cbl_last_bit7:
+_cbl_active:                            ; 1 while a sample is streaming (IRQ-driven)
+        .db     0
+_cbl_irq_saved_win3:                    ; WIN3 saved/restored inside the CBL IRQ
         .db     0

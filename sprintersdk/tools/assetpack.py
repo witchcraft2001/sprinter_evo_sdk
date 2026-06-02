@@ -458,13 +458,19 @@ def parse_wav(path: Path) -> tuple[bytes, int]:
 
 
 def cbl_ctrl_for_rate(rate: int) -> int:
-    # HW_NOTES.md §6.1: CBL rate control bytes are #D9/#DA/#DB for
-    # roughly 11/15/21 kHz; bit4 enables the #FE.7 half-FIFO indicator.
+    # CBL control byte written to port #004E (DCP-mapped). Bit layout (matches the
+    # MK_DEMO/MK_OUTI players that run on real hardware AND the emulator):
+    #   bit7 MODE, bit6 STEREO, bit5 16-bit, bit4 INT_ENA, bits[3:0] rate index.
+    # Mono 8-bit + INT -> 0x90 | rate. Rate idx: 9=10.9k 10=15.6k 11=21.9k 12=31.25k.
+    # NOTE: the old #D9/#DA/#DB ALSO set STEREO+16-bit, so a mono 8-bit sample was
+    # played as stereo 16-bit -> grinding noise + stretched duration on hardware.
     if rate <= 12000:
-        return 0xD9
+        return 0x99
     if rate <= 17000:
-        return 0xDA
-    return 0xDB
+        return 0x9A
+    if rate <= 26000:
+        return 0x9B
+    return 0x9C
 
 
 def run_tool(args: list[str]) -> None:

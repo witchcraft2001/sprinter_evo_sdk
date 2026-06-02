@@ -39,6 +39,7 @@
         .globl  _sprites_restore_after_swap
         .globl  _sound_tick
         .globl  _sync_tiles_to_shadow   ; from lib_tiles (dual-buffer tile sync)
+        .globl  _evo_cbl_irq            ; from lib_sound (CBL refill on IM2 #FF)
 
         .area   _SDK
 
@@ -144,7 +145,7 @@ im2_sound_setup:
         ; (symptom: sound ticks from CTC #06 but the main code is derailed = no
         ; image). ld (#1FFF),hl writes L->#1FFF, H->#2000. #2000 is the lowest
         ; stack byte (only touched on a >1023 B overflow, already fatal).
-        ld      hl, #im2_empty
+        ld      hl, #_evo_cbl_irq       ; #FF: CBL half-empty refill OR plain video IRQ
         ld      (IM2_TABLE + 0xFF), hl
         ld      a, #0x1F
         ld      i, a
