@@ -165,10 +165,41 @@ joy_check:
         or      a
         ret     nz                      ; any cursor/space key -> return it
 
-        ld      bc, #0x001F             ; else Kempston-compatible joystick
-        in      a, (c)
-        and     #0x1F
+        ; --- Sega/Kempston joystick on #1F: active pad needs SEL toggling ---
+        ; Per board author (RomanRom2): the Sega gamepad refreshes its status only on
+        ; a SEL edge -- a single static read returns stale/no data. SEL is SIO chB
+        ; WR5 bit7 (DTR), port #1B. Ported from sprinterJoySegaLib.asm (TMNT): toggle
+        ; SEL High/Low/High then read the normal-mode status; SEGA_JOY_DELAY (4 NOP
+        ; @3.5MHz) rescaled for 21MHz. Use IN A,(n) (DB 1F): the firmware redirects
+        ; it to the external decode; IN A,(C)/ED form hits the Z84C15 internal port
+        ; (the original `ld bc,#1F : in a,(c)` bug -- see sp2000.pdf §9).
+        call    sega_sel_high           ; cycle 1 (8BitDo M30 returns stale state here)
+        call    sega_sel_low            ; cycle 2 (A/Start mode)
+        call    sega_sel_high           ; cycle 3 -> reliable C,B,Up,Down,Left,Right
+        in      a, (#0x07)              ; DB 07 (A=#E0 -> #E007), like SJTEST /cache /07
+        and     #0x1F                   ; R=1 L=2 D=4 U=8 FIRE(B)=16
         ld      l, a
+        ret
+
+; SEL line = SIO channel B Write Register 5 bit7 (DTR). High=#E0, Low=#60 (both
+; keep Tx 8bit/char in D6,D5, as the reference driver does).
+sega_sel_high:
+        ld      a, #5
+        out     (#0x1B), a              ; SIO chB -> point at WR5
+        ld      a, #0xE0                ; DTR=1 -> SEL high (normal button set)
+        out     (#0x1B), a
+        jr      sega_settle
+sega_sel_low:
+        ld      a, #5
+        out     (#0x1B), a
+        ld      a, #0x60                ; DTR=0 -> SEL low
+        out     (#0x1B), a
+sega_settle:
+        ; gamepad mux settle. Ref: 4 NOP @3.5MHz (~4.6us). 21MHz is ~6x faster, so
+        ; djnz b=8 (~8*13 cyc / 21MHz ~= 5us) matches/exceeds the reference window.
+        ld      b, #8
+sega_settle_loop:
+        djnz    sega_settle_loop
         ret
 
 ; mouse_set(u8 x, u8 y): set pointer position, then re-clip.

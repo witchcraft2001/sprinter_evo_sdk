@@ -107,6 +107,12 @@ _evo_runtime_init::
         ld      bc, #0x004E             ; CBL on (idle arm)
         ld      a, #0x80
         out     (c), a
+        ; Joystick/Sega select: SIO chB /DTRB (WR5 bit7) drives J_SEL, which the
+        ; 74HC257 mux uses to pick the gamepad's button set (sp-dx-sch sheet 7:
+        ; /DTRB -> J_SEL -> mux -> X30 DB-9). Set it once to the "normal" set
+        ; (dirs + FIRE1); the SDK only exposes the standard 2-button Kempston/Sega,
+        ; so joystick() stays a plain IN A,(#1F) with no per-frame re-select.
+        ; WR5 bit7=DTR per Z84C15 datasheet; #E0 also sets Tx 8bit/char (D6,D5).
         call    im2_sound_setup        ; CTC 50Hz IM2 -> _sound_tick + _time; EI
         ret
 
