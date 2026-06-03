@@ -80,6 +80,9 @@ l_dss_w0    =       0xBC0D          ; original DSS WIN0 phys page (for exit)
 l_dss_w1    =       0xBC0E          ; original DSS WIN1 phys page (for exit)
 l_dss_w3    =       0xBC0F          ; original DSS WIN3 phys page (for exit)
 l_pages     =       0xBC10          ; 4 bytes: code chunk physical pages
+l_mem_handle =      0xBC14          ; scratch: last DSS.GetMem block handle
+l_mem_code  =       0xBC15          ; DSS block handle for the code chunks (for FreeMem on exit)
+l_mem_assets =      0xBC16          ; DSS block handle for the asset pages (0 = none)
 l_assets    =       0xBC20          ; up to 200 bytes: asset physical pages (-> #BCE7, below SP #BFFF)
 l_title     =       0xBC40          ; 32-byte title field, read+printed before any page
                                     ;   load; overlaps the l_assets scratch (only filled
@@ -103,6 +106,8 @@ EVO_SAVED_VMODE  = 0x1AC8           ; SRAM: original DSS video mode (for exit)
 EVO_SAVED_W0     = 0x1AC9           ; SRAM: original DSS WIN0 phys page (for exit)
 EVO_SAVED_W1     = 0x1ACA           ; SRAM: original DSS WIN1 phys page (for exit)
 EVO_SAVED_W3     = 0x1ACB           ; SRAM: original DSS WIN3 phys page (for exit)
+EVO_SAVED_MEM_CODE   = 0x1ACC       ; SRAM: DSS code-block handle (FreeMem on exit)
+EVO_SAVED_MEM_ASSETS = 0x1ACD       ; SRAM: DSS asset-block handle (0 = none)
 EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE
@@ -110,6 +115,8 @@ STAGE_SAVED_VMODE = STAGE + EVO_SAVED_VMODE
 STAGE_SAVED_W0   = STAGE + EVO_SAVED_W0
 STAGE_SAVED_W1   = STAGE + EVO_SAVED_W1
 STAGE_SAVED_W3   = STAGE + EVO_SAVED_W3
+STAGE_SAVED_MEM_CODE   = STAGE + EVO_SAVED_MEM_CODE
+STAGE_SAVED_MEM_ASSETS = STAGE + EVO_SAVED_MEM_ASSETS
 STAGE_META       = STAGE + EVO_META
 
 ; =========================================================================
@@ -209,6 +216,8 @@ no_packed_table:
         ld      b, a
         ld      hl, #l_pages
         call    getmem_pages
+        ld      a, (l_mem_handle)
+        ld      (l_mem_code), a         ; save code-block handle (FreeMem on exit)
         ld      b, #0                   ; chunk index
 load_code_loop:
         ld      a, (l_K)
@@ -257,12 +266,16 @@ load_code_done:
 
         ; --- 5b. M asset pages (DSS block -> BIOS phys list -> read 16K) ---
 load_assets:
+        xor     a
+        ld      (l_mem_assets), a       ; default: no asset block (0 = skip FreeMem)
         ld      a, (l_M)
         or      a
         jr      z, asset_done
         ld      b, a
         ld      hl, #l_assets
         call    getmem_pages
+        ld      a, (l_mem_handle)
+        ld      (l_mem_assets), a       ; save asset-block handle (FreeMem on exit)
         ld      b, #0
 asset_loop:
         ld      a, (l_M)
@@ -307,6 +320,10 @@ asset_done:
         ld      (STAGE_SAVED_W1), a     ; saved DSS WIN1 page (for exit)
         ld      a, (l_dss_w3)
         ld      (STAGE_SAVED_W3), a     ; saved DSS WIN3 page (for exit)
+        ld      a, (l_mem_code)
+        ld      (STAGE_SAVED_MEM_CODE), a   ; DSS code-block handle (FreeMem on exit)
+        ld      a, (l_mem_assets)
+        ld      (STAGE_SAVED_MEM_ASSETS), a ; DSS asset-block handle (0 = none)
         ld      a, (l_M)
         or      a
         jr      z, tables_done
@@ -401,6 +418,7 @@ getmem_pages:
         ld      c, #DSS_GETMEM
         rst     #0x10
         jr      c, getmem_pages_error_pophl
+        ld      (l_mem_handle), a       ; remember block handle (for FreeMem on exit)
         pop     hl
         ld      c, #BIOS_GETMEMBLKPAGES
         rst     #0x08

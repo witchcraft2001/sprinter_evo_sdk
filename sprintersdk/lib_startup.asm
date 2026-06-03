@@ -51,6 +51,9 @@ EVO_SAVED_VMODE = 0x1AC8         ; original DSS video mode (for exit), loader-fi
 EVO_SAVED_W0    = 0x1AC9         ; original DSS WIN0 phys page (for exit), loader-filled
 EVO_SAVED_W1    = 0x1ACA         ; original DSS WIN1 phys page (for exit), loader-filled
 EVO_SAVED_W3    = 0x1ACB         ; original DSS WIN3 phys page (for exit), loader-filled
+EVO_SAVED_MEM_CODE   = 0x1ACC    ; DSS code-block handle (we FreeMem it on exit), loader-filled
+EVO_SAVED_MEM_ASSETS = 0x1ACD    ; DSS asset-block handle (0 = none), loader-filled
+DSS_FREEMEM     = 0x3E           ; DSS.FreeMem: release a GetMem block (handle in A)
 EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
 
 ; Sprinter page-register ports (WIN0..WIN3). WIN2 is the program's own window
@@ -69,6 +72,8 @@ EXIT_CODE_DRAM  = 0x8001
 EXIT_W0_DRAM    = 0x8002
 EXIT_W1_DRAM    = 0x8003
 EXIT_W3_DRAM    = 0x8004
+EXIT_MEM_CODE_DRAM   = 0x8005    ; code-block handle, stashed to DRAM for the trampoline
+EXIT_MEM_ASSETS_DRAM = 0x8006    ; asset-block handle (0 = none)
 EXIT_TRAMP_DRAM = 0x8010
 EXIT_TRAMP_SP   = 0xBF00
 
@@ -283,6 +288,10 @@ _evo_runtime_shutdown::
         ld      (EXIT_W1_DRAM), a
         ld      a, (EVO_SAVED_W3)
         ld      (EXIT_W3_DRAM), a
+        ld      a, (EVO_SAVED_MEM_CODE)
+        ld      (EXIT_MEM_CODE_DRAM), a
+        ld      a, (EVO_SAVED_MEM_ASSETS)
+        ld      (EXIT_MEM_ASSETS_DRAM), a
         ld      hl, #tramp_src
         ld      de, #EXIT_TRAMP_DRAM
         ld      bc, #tramp_end - tramp_src
@@ -321,10 +330,41 @@ tramp_src:
         ld      a, #0xC0
         out     (CBL_CTRL_PORT), a      ; park PORT_Y at DSS-safe value
 
+        ; Flush the keyboard before DSS resumes: the game ran IM2 (DSS's key ISR was
+        ; off), so the last in-game keys sit in the SIO chA Rx FIFO. Drain it here
+        ; while still DI -- otherwise DSS's IM1 handler (re-armed below) would move
+        ; that stale key into its buffer and the shell would receive it. Mirrors
+        ; KEYINTER.RESCAN: read RR0 (#19) bit0 = Rx avail, read data (#18) to consume.
+tramp_flush_kbd:
+        in      a, (#0x19)              ; SIO chA status (RR0)
+        and     #1                      ; bit0 = Rx character available
+        jr      z, tramp_kbd_done
+        in      a, (#0x18)              ; read & discard the scancode
+        jr      tramp_flush_kbd
+tramp_kbd_done:
+
         ; DSS runs under IM1 and HALT-waits for its timer IRQ on return; the game
         ; ran IM2 with IFF off here, so re-arm IM1 + EI before handing back.
         im      1
         ei
+
+        ; Return our DSS memory blocks before leaving (good manners; DSS also frees
+        ; them on Exit, but a program should release what it allocated). FreeMem
+        ; clears the block's ownership, so the subsequent Exit does not double-free.
+        ; Asset block first (we are NOT executing from it); the code block LAST --
+        ; this trampoline runs in WIN2, part of the code block, so free it immediately
+        ; before Exit: no allocation happens in between, so the just-freed page is not
+        ; reused while we still run the final instructions from it. (jr is relative ->
+        ; position-independent after the copy to WIN2 DRAM.)
+        ld      a, (EXIT_MEM_ASSETS_DRAM)
+        or      a
+        jr      z, tramp_no_assets
+        ld      c, #DSS_FREEMEM         ; release the asset block (handle in A)
+        rst     #0x10
+tramp_no_assets:
+        ld      a, (EXIT_MEM_CODE_DRAM)
+        ld      c, #DSS_FREEMEM         ; release the code block (handle in A)
+        rst     #0x10
 
         ld      a, (EXIT_CODE_DRAM)
         ld      b, a
