@@ -49,6 +49,8 @@ set image.18=gfx\pic9.bmp
 set image.19=gfx\pic10.bmp
 
 rem Sprinter-only полноцветные версии картинок (оверрайды базовых pic*)
+set sprinter_palette.0=gfx\sp_title.bmp
+set sprinter_image.0=gfx\sp_title.bmp
 set sprinter_palette.10=gfx\sp_pic1.bmp
 set sprinter_image.10=gfx\sp_pic1.bmp
 set sprinter_palette.11=gfx\sp_pic2.bmp
@@ -71,6 +73,8 @@ set sprinter_palette.15=gfx\sp_pic6.bmp
 set sprinter_image.15=gfx\sp_pic6.bmp
 
 rem Sprinter: полноцветные фоны делят палитру с UI — база (16 цв.) в 0..15, фото в 16..255
+rem title накладывает спрайты-буквы (SPR_TITLEMASK) и текст -> база (0..15) обязана уцелеть
+set palette_base.0=16
 set palette_base.10=16
 set palette_base.11=16
 set palette_base.16=16

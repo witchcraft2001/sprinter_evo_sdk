@@ -110,8 +110,37 @@ def read_bmp(path: Path) -> tuple[list[tuple[int, int, int]], bytes, int, int, i
         raise SystemExit(f"assetpack: {path}: invalid BMP dimensions {width}x{height}")
     if compression != 0:
         raise SystemExit(f"assetpack: {path}: compressed BMP is not supported")
-    if bpp not in (4, 8):
-        raise SystemExit(f"assetpack: {path}: only 4/8bpp BMP is supported")
+    if bpp not in (4, 8, 24, 32):
+        raise SystemExit(f"assetpack: {path}: only 4/8/24/32bpp BMP is supported")
+
+    if bpp in (24, 32):
+        # Truecolour BMP: no palette in the file. Collapse distinct colours into a
+        # palette (<=256), like read_png's truecolour path -- no lossy quantisation,
+        # so reduce the colour count (or export indexed) if this raises. Alpha (32bpp
+        # X/A byte) is ignored: BMP keeps the legacy non-alpha transparency rule.
+        step = bpp // 8
+        row_bytes = ((bpp * width + 31) // 32) * 4
+        abs_height = abs(height)
+        bottom_up = height > 0
+        pixels = bytearray(width * abs_height)
+        pal_map: dict = {}
+        palette: list[tuple[int, int, int]] = []
+        for src_y in range(abs_height):
+            row_off = pixel_off + src_y * row_bytes
+            if row_off + row_bytes > len(data):
+                raise SystemExit(f"assetpack: {path}: short BMP pixel data")
+            dst = (abs_height - 1 - src_y if bottom_up else src_y) * width
+            for x in range(width):
+                o = row_off + x * step
+                rgb = (data[o + 2], data[o + 1], data[o])     # BGR -> RGB
+                j = pal_map.get(rgb)
+                if j is None:
+                    if len(palette) >= 256:
+                        raise SystemExit(f"assetpack: {path}: >256 distinct colours -- "
+                                         "export as an indexed BMP/PNG or reduce the colour count")
+                    j = len(palette); pal_map[rgb] = j; palette.append(rgb)
+                pixels[dst + x] = j
+        return palette, bytes(pixels), width, abs_height, 8
 
     palette_count = 16 if bpp == 4 else 256
     palette_off = 14 + dib_size
