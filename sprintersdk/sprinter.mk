@@ -72,8 +72,8 @@ SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
 SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
-CPPFLAGS := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
-CPPFLAGS_CP866 := $(SDCPPFLAGS) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
+CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
+CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
 PROJECT_TEXT_SRCS := $(shell find $(PROJECT) -path $(BUILD) -prune -o -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 # crt0 должен идти первым в линковке (=> _entry на code-loc).
@@ -187,13 +187,13 @@ $(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) | $(BUILD)
 	cp $@ $(basename $@).o
 
 # --- C (.c) -> .rel (в три шага, см. шапку) ---
-$(BUILD)/evo.rel: $(SDK_DIR)evo.c $(SDK_DIR)evo.h | $(BUILD)
+$(BUILD)/evo.rel: $(SDK_DIR)evo.c $(SDK_DIR)evo.h $(NATIVE_STAMP) | $(BUILD)
 	$(SDCPP) $(CPPFLAGS) $< > $(BUILD)/evo.i
 	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/evo.asm < $(BUILD)/evo.i
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/evo.asm
 	cp $@ $(basename $@).o
 
-$(BUILD)/main.rel: $(CP866_STAMP) | $(BUILD)
+$(BUILD)/main.rel: $(CP866_STAMP) $(NATIVE_STAMP) | $(BUILD)
 	$(SDCPP) $(CPPFLAGS_CP866) $(CP866_SRC_DIR)/main.c > $(BUILD)/main.i
 	$(SDCC) $(SDCC_CFLAGS) --c1mode -o $(BUILD)/main.asm < $(BUILD)/main.i
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/main.asm

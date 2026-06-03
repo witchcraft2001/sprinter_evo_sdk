@@ -120,6 +120,27 @@ void vsync(void) _naked;
 
 u8 joystick(void) _naked;
 
+#if defined(__SPRINTER__) && NATIVE
+//Sprinter, NATIVE-сборка: полный опрос Sega-геймпада (3/6 кнопок).
+//Возвращает u16: младший байт -- стандартные JOY_RIGHT..JOY_START (направления +
+//B(=FIRE),C,A,Start), старший байт -- доп. кнопки 6-button + флаг подключения.
+//Активный Sega-пад "дёргает" SEL внутри опроса (9 полуциклов), дороже обычного
+//joystick(); направления берутся из надёжного 3-го цикла. Только под Sprinter.
+#define JOY_B          0x0010   /* == JOY_FIRE */
+#define JOY_C          0x0020
+#define JOY_A          0x0040
+#define JOY_START      0x0080
+#define JOY_MODE       0x0100
+#define JOY_X          0x0200
+#define JOY_Y          0x0400
+#define JOY_Z          0x0800
+#define JOY_STAR       0x1000
+#define JOY_HOME       0x2000
+#define JOY_CONNECTED  0x8000   /* 6-кнопочный пад обнаружен (иначе только 3 кнопки) */
+
+u16 joystick_ex(void) _naked;
+#endif
+
 //опрос клавиатуры, возвращает состояние клавиш в 40-байтный массив
 //для опроса клавиш есть константы KEY_
 

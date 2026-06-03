@@ -37,6 +37,16 @@ RESOURCE_PREFIXES = {
     "sample": "SMP_",
 }
 
+# Sprinter-only ADD keys: a resource present ONLY in the Sprinter build (Evo's
+# makeresh never sees these var prefixes). Maps the manifest key to its base type.
+SPRINTER_ONLY_KEYS = {
+    "sprinter_only_image": "image",
+    "sprinter_only_palette": "palette",
+    "sprinter_only_music": "music",
+    "sprinter_only_sample": "sample",
+    "sprinter_only_sprite": "sprite",
+}
+
 
 def warn(msg: str) -> None:
     print(f"resgen: warning: {msg}", file=sys.stderr)
@@ -96,6 +106,16 @@ def parse_compile_bat(path: Path) -> tuple[dict[str, list[tuple[str, Path]]], Pa
         # that also included accidental/plural `sprites.N` variables.
         if key == "sprites":
             key = "sprite"
+
+        # Sprinter-only ADD: `set sprinter_only_image.N=file` / `sprinter_only_palette.N`
+        # etc. declare a resource that exists ONLY in the Sprinter build (Evo's makeresh
+        # never sees this var prefix, exactly like `sprinter_*` overrides). It is appended
+        # to its base type so existing IDs don't shift; the IMG_/PAL_ name still comes from
+        # the file. Used for Sprinter-exclusive assets (e.g. the boot logo) without a base.
+        only_type = SPRINTER_ONLY_KEYS.get(key)
+        if only_type is not None:
+            entries[only_type].append((var_name.lower(), base / normalized_value))
+            continue
 
         if key in entries:
             entries[key].append((var_name.lower(), base / normalized_value))

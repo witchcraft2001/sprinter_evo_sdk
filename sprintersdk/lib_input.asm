@@ -14,6 +14,9 @@
         .globl  _mouse_set
         .globl  _mouse_clip
         .globl  _mouse_delta
+.if NATIVE
+        .globl  _joystick_ex            ; NATIVE: full Sega 3/6-button read (u16)
+.endif
 
         .area   _SDK
 
@@ -165,15 +168,19 @@ joy_check:
         or      a
         ret     nz                      ; any cursor/space key -> return it
 
-        ; --- Sega/Kempston joystick on #1F: active pad needs SEL toggling ---
-        ; Per board author (RomanRom2): the Sega gamepad refreshes its status only on
-        ; a SEL edge -- a single static read returns stale/no data. SEL is SIO chB
-        ; WR5 bit7 (DTR), port #1B. Ported from sprinterJoySegaLib.asm (TMNT): toggle
-        ; SEL High/Low/High then read the normal-mode status; SEGA_JOY_DELAY (4 NOP
-        ; @3.5MHz) rescaled for 21MHz. Use IN A,(n) (DB 1F): the firmware redirects
-        ; it to the external decode; IN A,(C)/ED form hits the Z84C15 internal port
-        ; (the original `ld bc,#1F : in a,(c)` bug -- see sp2000.pdf §9).
-        call    sega_sel_high           ; cycle 1 (8BitDo M30 returns stale state here)
+        ; --- Sega/Kempston joystick: read port #07 from SRAM cache, toggle SEL ---
+        ; Two facts (verified on HW, see manual_issues.md / sp2000.pdf §9):
+        ;  (1) PORT. The Kempston input is decoded WITHOUT address bits A3/A4
+        ;      (DCP index = A2,A5,A6,A7,A13-15), so #07 and #1F are the same external
+        ;      port. But #1F (range #10-#1F) is ALSO the Z84C15 internal PIO; code
+        ;      running in SRAM cache (WIN0) reads that internal port at #1F, so from
+        ;      cache the joystick is reached via the #07 alias. (Outside cache, #1F.)
+        ;  (2) SEL. An active Sega gamepad refreshes its status only on a SEL edge --
+        ;      a single static read returns stale data. SEL = SIO chB WR5 bit7 (DTR),
+        ;      port #1B. Directions are reliable at cycle 3 of High/Low/High (cycle 1
+        ;      is stale on 8BitDo M30 etc.). Ported from sprinterJoySegaLib.asm/SJTEST
+        ;      (TMNT); SEGA_JOY_DELAY (4 NOP @3.5MHz) rescaled for 21MHz.
+        call    sega_sel_high           ; cycle 1 (stale on some pads)
         call    sega_sel_low            ; cycle 2 (A/Start mode)
         call    sega_sel_high           ; cycle 3 -> reliable C,B,Up,Down,Left,Right
         in      a, (#0x07)              ; DB 07 (A=#E0 -> #E007), like SJTEST /cache /07
@@ -201,6 +208,84 @@ sega_settle:
 sega_settle_loop:
         djnz    sega_settle_loop
         ret
+
+.if NATIVE
+; -------------------------------------------------------------------------
+; u16 joystick_ex(void)  [NATIVE only] -- full Sega 3/6-button gamepad read.
+; Returns HL:
+;   L (low)  = Start,A,C,B,Up,Down,Left,Right   (bit7..bit0)
+;   H (high) = Conn,--,Home,Star,Z,Y,X,Mode      (bit7..bit0)
+; i.e. JOY_RIGHT/LEFT/DOWN/UP/FIRE(B)/C/A/START in L and JOY_MODE/X/Y/Z/STAR/
+; HOME/CONNECTED in H (see evo.h). Direct port of SJTEST.ASM SegaJoyHandler:
+; 9 SEL half-cycles (High/Low...), directions from cycle 3, extra buttons from
+; cycles 6-8; a 6-button pad is detected when cycle 6 reads %xxxx1111. Reads via
+; #07 (SRAM-cache alias of the Kempston port). Registers C,D,E,H,L survive the
+; sega_sel_* calls (they only clobber A,B); cycle 9 is bracketed by push/pop.
+; -------------------------------------------------------------------------
+_joystick_ex::
+        call    sega_sel_high           ; cycle 1 (stale)
+        in      a, (#0x07)
+        call    sega_sel_low            ; cycle 2 -> A/Start + connected bit
+        in      a, (#0x07)
+        and     #0x3F
+        ld      h, a                    ; H = cycle 2
+        call    sega_sel_high           ; cycle 3 -> reliable C,B,Up,Down,Left,Right
+        in      a, (#0x07)
+        and     #0x3F
+        ld      l, a                    ; L = cycle 3
+        call    sega_sel_low            ; cycle 4
+        call    sega_sel_high           ; cycle 5
+        call    sega_sel_low            ; cycle 6
+        in      a, (#0x07)
+        and     #0x3F
+        ld      d, a                    ; D = cycle 6 (== %xxxx1111 on a 6-button pad)
+        call    sega_sel_high           ; cycle 7 -> Z,Y,X,Mode
+        in      a, (#0x07)
+        and     #0x3F
+        ld      c, a                    ; C = cycle 7
+        call    sega_sel_low            ; cycle 8 -> Home,Star
+        in      a, (#0x07)
+        and     #0x3F
+        ld      b, a                    ; B = cycle 8
+        push    bc                      ; preserve cycle 7/8 across cycle 9
+        call    sega_sel_high           ; cycle 9 -> back to normal (counter reset idle)
+        pop     bc
+
+        ld      a, d                    ; 6-button if cycle 6 low nibble == #F
+        or      #0xF0
+        inc     a
+        jr      z, joyex_ext
+        ld      bc, #0                  ; 3-button: no extra buttons
+        jr      joyex_pack
+joyex_ext:
+        ld      a, c                    ; C = ----,Z,Y,X,Mode
+        and     #0x0F
+        ld      c, a
+        ld      a, b                    ; cycle 8: Home(bit3), Star(bit1)
+        and     #0x0A
+        ld      b, a
+        and     #0x02                   ; Star
+        add     a, b
+        rlca
+        rlca                            ; Home->bit5, Star->bit4
+        or      c
+        ld      c, a                    ; C = --,Home,Star,Z,Y,X,Mode
+joyex_pack:
+        ; H = cycle 2 (used twice), C = extra-button byte so far, L = cycle 3.
+        ld      a, h                    ; cycle 2 bit0 = gamepad-connected
+        and     #0x01
+        rrca                            ; -> bit7
+        or      c
+        ld      c, a                    ; C = PACK_C (Conn,--,Home,Star,Z,Y,X,Mode)
+        ld      a, h                    ; cycle 2 bits 5,4 = Start,A
+        and     #0x30
+        rlca
+        rlca                            ; -> bits 7,6
+        or      l                       ; | cycle 3 (C,B,Up,Down,Left,Right)
+        ld      l, a                    ; L = PACK_A (Start,A,C,B,Up,Down,Left,Right)
+        ld      h, c                    ; H = PACK_C
+        ret
+.endif
 
 ; mouse_set(u8 x, u8 y): set pointer position, then re-clip.
 _mouse_set::
