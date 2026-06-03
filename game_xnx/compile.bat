@@ -48,6 +48,10 @@ set image.17=gfx\pic8.bmp
 set image.18=gfx\pic9.bmp
 set image.19=gfx\pic10.bmp
 
+rem Sprinter-only логотип-заставка (нет базы на Evo -> sprinter_only_*; PNG, 30 цв.)
+set sprinter_only_palette.20=gfx\sprinterLogo.png
+set sprinter_only_image.20=gfx\sprinterLogo.png
+
 rem Sprinter-only полноцветные версии картинок (оверрайды базовых pic*)
 set sprinter_palette.0=gfx\sp_title.bmp
 set sprinter_image.0=gfx\sp_title.bmp
