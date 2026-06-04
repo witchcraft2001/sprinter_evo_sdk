@@ -275,6 +275,16 @@ _evo_runtime_shutdown::
         ld      bc, #0x004E
         xor     a
         out     (c), a
+        ; CTC: we programmed CH2/CH3 for the 50 Hz IM2 sound tick (CH3 with its
+        ; interrupt enabled). Left running, CH3 keeps raising interrupts after we
+        ; hand back to DSS, which derails the next program's CTC/IM2 setup (e.g.
+        ; TMNT fails to start). Reset both (control word #03 = sw reset + interrupt
+        ; off) -> idle. (The CTC is write-only, so we can't restore DSS's exact
+        ; config; but DSS times off the 50 Hz video IRQ, not the CTC, so idle is the
+        ; pre-launch state for it and a clean slate for the next program.)
+        ld      a, #0x03
+        out     (#CTC_CH2), a
+        out     (#CTC_CH3), a
         ; Launcher runs in SRAM (CACHE on): stash exit code + the saved video
         ; mode and DSS page numbers (read from SRAM) into WIN2 DRAM, copy the
         ; trampoline to WIN2, run. The trampoline can't read SRAM (cache off).
