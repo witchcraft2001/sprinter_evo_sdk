@@ -180,11 +180,17 @@ joy_check:
         ;      port #1B. Directions are reliable at cycle 3 of High/Low/High (cycle 1
         ;      is stale on 8BitDo M30 etc.). Ported from sprinterJoySegaLib.asm/SJTEST
         ;      (TMNT); SEGA_JOY_DELAY (4 NOP @3.5MHz) rescaled for 21MHz.
+        ;  (3) POLARITY. The gamepad's lines are active-LOW at the connector (pressed
+        ;      pulls the line to 0), but the Sprinter Kempston interface INVERTS them,
+        ;      so the port reads active-HIGH: a pressed key = 1. (Confirmed by the
+        ;      6-button detect in sprinterJoySegaLib: a grounded/pressed line reads as
+        ;      1 -- cycle 6 == %xxxx1111.) So we mask directly, NO cpl, matching the
+        ;      EvoSDK joystick() contract (set bit = pressed), like the cursor path above.
         call    sega_sel_high           ; cycle 1 (stale on some pads)
         call    sega_sel_low            ; cycle 2 (A/Start mode)
         call    sega_sel_high           ; cycle 3 -> reliable C,B,Up,Down,Left,Right
         in      a, (#0x07)              ; DB 07 (A=#E0 -> #E007), like SJTEST /cache /07
-        and     #0x1F                   ; R=1 L=2 D=4 U=8 FIRE(B)=16
+        and     #0x1F                   ; R=1 L=2 D=4 U=8 FIRE(B)=16 (pressed = 1)
         ld      l, a
         ret
 
