@@ -120,8 +120,8 @@ void vsync(void) _naked;
 
 u8 joystick(void) _naked;
 
-#if defined(__SPRINTER__) && NATIVE
-//Sprinter, NATIVE-сборка: полный опрос Sega-геймпада (3/6 кнопок).
+#if defined(__SPRINTER__) && (NATIVE || SEGA_EX)
+//Sprinter: полный опрос Sega-геймпада (3/6 кнопок), если включён NATIVE или SEGA_EX.
 //Возвращает u16: младший байт -- стандартные JOY_RIGHT..JOY_START (направления +
 //B(=FIRE),C,A,Start), старший байт -- доп. кнопки 6-button + флаг подключения.
 //Активный Sega-пад "дёргает" SEL внутри опроса (9 полуциклов), дороже обычного

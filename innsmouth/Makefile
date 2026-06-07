@@ -1,4 +1,5 @@
 PROJECT := .
+SEGA_EX := 1
 
 all: exe
 

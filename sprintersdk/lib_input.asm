@@ -14,8 +14,8 @@
         .globl  _mouse_set
         .globl  _mouse_clip
         .globl  _mouse_delta
-.if NATIVE
-        .globl  _joystick_ex            ; NATIVE: full Sega 3/6-button read (u16)
+.if NATIVE + SEGA_EX
+        .globl  _joystick_ex            ; optional full Sega 3/6-button read (u16)
 .endif
 
         .area   _SDK
@@ -215,9 +215,9 @@ sega_settle_loop:
         djnz    sega_settle_loop
         ret
 
-.if NATIVE
+.if NATIVE + SEGA_EX
 ; -------------------------------------------------------------------------
-; u16 joystick_ex(void)  [NATIVE only] -- full Sega 3/6-button gamepad read.
+; u16 joystick_ex(void)  [NATIVE or SEGA_EX] -- full Sega 3/6-button gamepad read.
 ; Returns HL:
 ;   L (low)  = Start,A,C,B,Up,Down,Left,Right   (bit7..bit0)
 ;   H (high) = Conn,--,Home,Star,Z,Y,X,Mode      (bit7..bit0)

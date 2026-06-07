@@ -10,20 +10,42 @@ static u8 keys[40];
 struct room2 *curroom;
 static u8 noredraw;
 
-/* Joystick + Q/A/O/P/Space keyboard fallback. Returns the same bitmask
- * joystick() does (JOY_LEFT/RIGHT/UP/DOWN/FIRE), OR-ing in bits set by
- * the classic Spectrum keys: Q=up, A=down, O=left, P=right, Space=fire.
- * Lets the game be controllable on machines without a Kempston button
- * mapping. Reuses the file-scope `keys` buffer to avoid stack growth. */
-static u8 joy_or_kbd(void)
+#define INPUT_ENTER 0x20
+#define INPUT_QUIT  0x40
+
+/* A/B are the primary action (Space/FIRE); C is Enter/inventory. */
+static u8 input_state(void)
 {
-	u8 v = joystick();
+	u8 v;
+#if defined(__SPRINTER__) && (NATIVE || SEGA_EX)
+	static u16 sega_prev;
+	u16 sega;
+	u16 sega_pressed;
+#endif
+	v = joystick();
+#if defined(__SPRINTER__) && (NATIVE || SEGA_EX)
+	sega = joystick_ex();
+	sega_pressed = sega & ~sega_prev;
+	if (sega & JOY_CONNECTED) {
+		v |= (u8)(sega & (JOY_RIGHT | JOY_LEFT | JOY_DOWN | JOY_UP | JOY_FIRE));
+		if (sega & JOY_A) v |= JOY_FIRE;
+		if (sega & JOY_C) v |= INPUT_ENTER;
+		if (sega_pressed & JOY_START) v |= INPUT_QUIT;
+	}
+	sega_prev = sega;
+#endif
 	keyboard(keys);
 	if (keys[KEY_P]     == KEY_DOWN) v |= JOY_RIGHT;
 	if (keys[KEY_O]     == KEY_DOWN) v |= JOY_LEFT;
 	if (keys[KEY_A]     == KEY_DOWN) v |= JOY_DOWN;
 	if (keys[KEY_Q]     == KEY_DOWN) v |= JOY_UP;
-	if (keys[KEY_SPACE] == KEY_DOWN) v |= JOY_FIRE;
+#ifdef __SPRINTER__
+	if (keys[KEY_CAPS]&KEY_DOWN) {
+		if (keys[KEY_SPACE]&KEY_DOWN) v |= INPUT_QUIT;
+	} else
+#endif
+	if (keys[KEY_SPACE]&KEY_DOWN) v |= JOY_FIRE;
+	if (keys[KEY_ENTER]&KEY_DOWN) v |= INPUT_ENTER;
 	return v;
 }
 
@@ -207,7 +229,6 @@ void draw_text(struct room2 *rm,struct text *txt)
 	txt->y=12-(txt->h/2)-1;
 	for(c=0;c<txt->count_phrases;c++)
 	{
-		sample_play(SMP_SWITCH);
 		output_x=txt->x;
 		output_y=txt->y;
 		put_str("╔");
@@ -265,8 +286,9 @@ void draw_text(struct room2 *rm,struct text *txt)
 		output_y=txt->y+1;
 		put_str(txt->text[c]);
 		swap_screen();
+		sample_play(SMP_SWITCH);
 		delay(10);
-		while(joy_or_kbd()==0);
+		while(input_state()==0);
 		
 	}
 	if (noredraw!=2)	draw_room(rm);
@@ -274,6 +296,55 @@ void draw_text(struct room2 *rm,struct text *txt)
 	sprites_start();
 	delay(15);
 }
+
+#ifdef __SPRINTER__
+static void confirm_quit(struct room2 *rm)
+{
+	u8 a,b,inp;
+	sprites_stop();
+	output_x=1;
+	output_y=9;
+	put_str("╔════════════════════════════════════╗");
+	for(b=10;b<13;b++)
+	{
+		output_x=1;
+		output_y=b;
+		put_str("║");
+		for(a=0;a<36;a++) put_str(" ");
+		output_x=38;
+		output_y=b;
+		put_str("║");
+	}
+	output_x=1;
+	output_y=13;
+	put_str("╚════════════════════════════════════╝");
+	output_x=5;
+	output_y=10;
+	put_str("Нажмите Esc/Start для выхода");
+	output_x=7;
+	output_y=11;
+	put_str("или другую кнопку");
+	output_x=9;
+	output_y=12;
+	put_str("для продолжения");
+	swap_screen();
+	sample_play(SMP_SWITCH);
+	while(input_state()!=0);
+	while(1)
+	{
+		inp=input_state();
+		if(inp!=0)
+		{
+			if(inp&INPUT_QUIT) quit_to_dss();
+			draw_room(rm);
+			swap_screen();
+			sprites_start();
+			delay(15);
+			return;
+		}
+	}
+}
+#endif
 
 void title(void)
 {
@@ -284,7 +355,7 @@ void title(void)
 	draw_image(0,0,IMG_TITLE);
 	swap_screen();
 	fade_from_black();
-	while(joy_or_kbd()==0);
+	while(input_state()==0);
 	sample_play(SMP_BELL);
 	fade_to_black();
 	clear_screen(1);
@@ -533,7 +604,7 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				pal_select(PAL_GAMEOVER);
 				draw_image(0,0,IMG_GAMEOVER);
 				swap_screen();
-				while(joy_or_kbd()==0);
+				while(input_state()==0);
 				sprites_start();
 				border(1);
 				clear_screen(1);
@@ -643,6 +714,7 @@ u8 inventory(struct room2 *rm,character* chr)
 {
 	u8 a,b,c;
 	u8 exit;
+	u8 inp;
 	exit=0;
 	c=0;
 	a=1;
@@ -657,8 +729,8 @@ u8 inventory(struct room2 *rm,character* chr)
 	while(exit==0)
 	{
 		
-		keyboard(keys);
-		if (keys[KEY_ENTER]==KEY_DOWN)
+		inp=input_state();
+		if (inp&INPUT_ENTER)
 		{
 			exit=1;
 			if(chr->count_items>0)
@@ -671,9 +743,9 @@ u8 inventory(struct room2 *rm,character* chr)
 			}
 			//return(b+1);
 		}
-		if(joy_or_kbd()!=0)
+		if(inp!=0)
 		{
-			if(joy_or_kbd()==JOY_LEFT)
+			if(inp&JOY_LEFT)
 			{
 				if(b==0)b=chr->count_items;
 				b--;
@@ -682,7 +754,7 @@ u8 inventory(struct room2 *rm,character* chr)
 				sample_play(SMP_INVENTORY);
 				swap_screen();
 			}
-			if(joy_or_kbd()==JOY_RIGHT)
+			if(inp&JOY_RIGHT)
 			{
 				b++;
 				if(b==chr->count_items)b=0;
@@ -706,6 +778,7 @@ void main(void)
   
   static u8 i;
   static u8 xx,yy,a,b,c;
+  static u8 inp;
   static u8 palette[16];
   
   character james;
@@ -727,10 +800,18 @@ void main(void)
   
   while(1)
   {
+	inp=input_state();
+#ifdef __SPRINTER__
+	if(inp&INPUT_QUIT)
+	{
+		confirm_quit(curroom);
+		inp=0;
+	}
+#endif
 	b=on_trig(curroom,james.x,0,james.x+1,james.y);
 	if(b!=1)	set_sprite(2,curroom->triggers[b-5].x*8,curroom->triggers[b-5].y*16,48);
 	else set_sprite(2,3,3,49);
-  if(joy_or_kbd()==JOY_LEFT && james.x>0)
+  if((inp&JOY_LEFT) && james.x>0)
   {
 	//if(on_trig(curroom,james.x,0,james.x+1,james.y)!=1)	set_sprite(2,3,3,48);
 	//b=on_trig(curroom,james.x,0,james.x+1,james.y);
@@ -742,7 +823,7 @@ void main(void)
     james.napr=3;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if(joy_or_kbd()==JOY_RIGHT&& james.x<(150))
+  if((inp&JOY_RIGHT)&& james.x<(150))
   {
 
     //james.x++;
@@ -755,7 +836,7 @@ void main(void)
     james.napr=1;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if(joy_or_kbd()==JOY_UP&& james.y>0)
+  if((inp&JOY_UP)&& james.y>0)
   {
 
     //if(on_trig(curroom,james.x,0,james.x+1,james.y)!=1)	set_sprite(2,3,3,48);
@@ -768,7 +849,7 @@ void main(void)
     james.napr=4;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if(joy_or_kbd()==JOY_DOWN&&james.y<184)
+  if((inp&JOY_DOWN)&&james.y<184)
   {
     //if(on_trig(curroom,james.x,0,james.x+1,james.y)!=1)	set_sprite(2,3,3,48);
 	//b=on_trig(curroom,james.x,0,james.x+1,james.y);
@@ -780,13 +861,12 @@ void main(void)
     james.napr=2;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if(joy_or_kbd()==JOY_FIRE)
+  if(inp&JOY_FIRE)
   {
 	check_triggers(curroom,&james,rooms,&curroom,1);
 	
   }
-  keyboard(keys);
-  if(keys[KEY_ENTER]==KEY_DOWN)
+  if(inp&INPUT_ENTER)
   {
 	a=inventory(curroom,&james);
 	if(a!=0)
