@@ -38,6 +38,18 @@ set image.11=basement.bmp
 set image.12=gameover.bmp
 set image.13=title.bmp
 set image.14=win.bmp
+
+rem Sprinter-only полноцветные версии картинок (оверрайды базовых изображений).
+set sprinter_palette.0=sprinter\inventory.png
+set sprinter_image.4=sprinter\inventory.png
+set sprinter_palette.3=sprinter\deep_one.png
+set sprinter_image.7=sprinter\deep_one.png
+set sprinter_image.8=sprinter\scratch1.png
+set sprinter_image.9=sprinter\scratch2.png
+set sprinter_palette.5=sprinter\title.png
+set sprinter_image.13=sprinter\title.png
+set sprinter_palette.6=sprinter\win.png
+set sprinter_image.14=sprinter\win.png
 rem спрайты
 
 set sprite.0=char.bmp
