@@ -967,67 +967,52 @@ write_palette_entry:
         pop     bc
         ret
 
-; apply_palette_256: write all 256 palette entries (§9.1, 256-colour path).
-;   In: HL = EVOS PAL payload ([u16 count][256*(R8,G8,B8)]) mapped in WIN1.
-;   Each 6-bit channel (R8>>2) is scaled by the current brightness through
-;   bright6_table (7*64, same curve as pal_bright_table). Writes both palette
-;   banks at PORT_Y = index, WIN3 = #50. Caller restores WIN1.
+; apply_palette_256: write all 256 palette entries (§9.1, 256-colour path) at
+;   FULL 8-bit depth. In: HL = EVOS PAL payload ([u16 count][256*(R8,G8,B8)])
+;   mapped in WIN1. The Sprinter palette register is 8 bits/channel (0..255 --
+;   manual 05_graphics/05_palette "4 байта на цвет: R,G,B 0..255"); the old
+;   RGB6<<2 path silently dropped the low 2 bits of every channel. Each 8-bit
+;   channel is now mapped through pal_lut8[256] (the current-brightness curve)
+;   and written verbatim. Writes both palette banks at PORT_Y=index, WIN3=#50.
+;   Caller restores WIN1. Coarse-brightness entry: builds pal_lut8 from
+;   _pal_bright_level (curve identical to the old bright6_table at MID/anchors).
 apply_palette_256:
-        ; coarse path: scale table = bright6_table[level*64] (handles overbright
-        ; levels 4..6 too). _bright6_base set, then run the shared writer.
-        ; HL = payload on entry -- preserve it, the run stage sets IX from it.
         push    hl                      ; save payload pointer
+        ; coarse 0..6 -> pal_lut8 (8-bit). level<=3 darken: lut[i]=round(i*level/3).
+        ; level>3 brighten: lut[i]=round(i+(255-i)*(level-3)/3)
+        ;   = round((i*(6-level) + 255*(level-3))/3)  -> step=6-level, q0=85*(level-3).
         ld      a, (_pal_bright_level)
-        ld      l, a
-        ld      h, #0
-        add     hl, hl
-        add     hl, hl
-        add     hl, hl
-        add     hl, hl
-        add     hl, hl
-        add     hl, hl                  ; *64
-        ld      de, #bright6_table
+        cp      #4
+        jr      nc, ap256_bright
+        ld      c, a                    ; step = level
+        ld      d, #0                   ; q0 = 0
+        jr      ap256_build
+ap256_bright:
+        ld      b, a                    ; save level
+        ld      a, #6
+        sub     b
+        ld      c, a                    ; step = 6 - level
+        ld      a, b
+        sub     #3                      ; k = level - 3 (1..3)
+        ld      e, a
+        ld      d, #0
+        ld      hl, #q0_85k
         add     hl, de
-        ld      (_bright6_base), hl
+        ld      d, (hl)                 ; q0 = 85*k
+ap256_build:
+        call    build_lut_div3          ; C=step, D=q0 -> pal_lut8
         pop     hl                      ; HL = payload again
         jr      apply_palette_256_run
 
+q0_85k:
+        .db     0, 85, 170, 255         ; 85*k for k = 0..3
+
 apply_palette_256_fine:
-        ; fine path: build a 64-byte scale table for the current fine level
-        ; (channel v6 -> (v6*level/32)<<2), point _bright6_base at it, then run
-        ; the same writer. v6*level is accumulated (no multiply): acc starts at 16
-        ; (the rounding bias) and += level each step; out = (acc>>3) & 0xFC.
-        ; In: HL = payload. Both HL (payload) and IX (caller's frame pointer --
-        ; SDCC treats IX as callee-saved) MUST survive: building the scale table
-        ; clobbers IX, and the shared writer restores whatever IX it sees on
-        ; entry, so we hand it back the caller's IX here.
-        push    ix                      ; save caller IX (frame pointer)
+        ; fine brightness 0..32 (32 = normal): build pal_lut8[i] = round(i*level/32).
         push    hl                      ; save payload pointer
-        ld      hl, #fine_scale_table
-        ld      (_bright6_base), hl
-        ld      ix, #fine_scale_table
         ld      a, (_fine_bright_level)
-        ld      e, a
-        ld      d, #0                   ; de = level (per-step increment)
-        ld      hl, #16                 ; acc = v6*level + 16 (starts at v6=0)
-        ld      b, #64
-fine_scale_loop:
-        push    hl
-        srl     h
-        rr      l
-        srl     h
-        rr      l
-        srl     h
-        rr      l                       ; hl = acc >> 3
-        ld      a, l
-        and     #0xFC                   ; (acc>>5)<<2 == (acc>>3)&0xFC
-        ld      (ix), a
-        inc     ix
-        pop     hl
-        add     hl, de                  ; acc += level
-        djnz    fine_scale_loop
+        call    build_lut_fine          ; A = level -> pal_lut8
         pop     hl                      ; HL = payload again
-        pop     ix                      ; IX = caller frame pointer again
         ; fall through to the shared writer
 
 apply_palette_256_run:
@@ -1040,26 +1025,30 @@ apply_palette_256_run:
         ld      (_pal_saved_win3), a
         ld      a, #VRAM_PAGE
         out     (#0xE2), a              ; WIN3 = #50 for #C3Ex
+        ld      de, #pal_lut8           ; DE = brightness LUT base (kept across loop)
         ld      c, #0                   ; palette index 0..255
 pal256_loop:
         ld      a, c
         out     (#0x89), a              ; PORT_Y = index
         ld      a, 0 (ix)               ; R8
-        srl     a
-        srl     a                       ; v6 = R8>>2
-        call    bright6_lookup
+        ld      l, a
+        ld      h, #0
+        add     hl, de                  ; pal_lut8 + R8
+        ld      a, (hl)                 ; full 8-bit channel value
         ld      (#0xC3E0), a
         ld      (#0xC3E4), a
         ld      a, 1 (ix)               ; G8
-        srl     a
-        srl     a
-        call    bright6_lookup
+        ld      l, a
+        ld      h, #0
+        add     hl, de
+        ld      a, (hl)
         ld      (#0xC3E1), a
         ld      (#0xC3E5), a
         ld      a, 2 (ix)               ; B8
-        srl     a
-        srl     a
-        call    bright6_lookup
+        ld      l, a
+        ld      h, #0
+        add     hl, de
+        ld      a, (hl)
         ld      (#0xC3E2), a
         ld      (#0xC3E6), a
         xor     a
@@ -1079,13 +1068,62 @@ pal256_loop:
         pop     ix
         ret
 
-; bright6_lookup: A (0..63) -> A = bright6_table[_bright6_base + A]. Clobbers HL/DE.
-bright6_lookup:
-        ld      l, a
-        ld      h, #0
-        ld      de, (_bright6_base)
-        add     hl, de
-        ld      a, (hl)
+; build_lut_fine: pal_lut8[i] = (i*level + 16) >> 5, i = 0..255 (= round(i*level/32)).
+;   In: A = fine level 0..32 (32 = identity). Division-free accumulator; built
+;   once per fade step, then the writer does 256*3 plain table lookups.
+;   Clobbers A, BC, DE, HL.
+build_lut_fine:
+        ld      c, a                    ; C = level (per-step increment)
+        ld      hl, #pal_lut8
+        ld      de, #16                 ; num = i*level + 16 (rounding bias)
+        ld      b, #0                   ; 256 iterations (djnz wraps 0 -> 256)
+blf_loop:
+        push    de
+        srl     d
+        rr      e
+        srl     d
+        rr      e
+        srl     d
+        rr      e
+        srl     d
+        rr      e
+        srl     d
+        rr      e                       ; de = num >> 5  (E = 0..255, D = 0)
+        ld      a, e
+        ld      (hl), a
+        inc     hl
+        pop     de
+        ld      a, c
+        add     a, e
+        ld      e, a
+        jr      nc, blf_next
+        inc     d                       ; carry into high byte
+blf_next:
+        djnz    blf_loop
+        ret
+
+; build_lut_div3: pal_lut8[i] = q, where q = q0 and advances by step/3 with
+;   rounding (rem seeded to 1 ~ +0.5). In: C = step (0..3), D = q0 (0..255).
+;   Division-free (rem < 3, <=2 subtractions/step). Clobbers A, B, DE, HL.
+build_lut_div3:
+        ld      hl, #pal_lut8
+        ld      e, #1                   ; rem = rounding bias
+        ld      b, #0                   ; 256 iterations
+bd3_loop:
+        ld      a, d
+        ld      (hl), a                 ; lut[i] = q
+        inc     hl
+        ld      a, e
+        add     a, c                    ; rem += step
+bd3_adj:
+        cp      #3
+        jr      c, bd3_done
+        sub     #3
+        inc     d                       ; q++
+        jr      bd3_adj
+bd3_done:
+        ld      e, a                    ; rem
+        djnz    bd3_loop
         ret
 
 ; -------------------------------------------------------------------------
@@ -1163,51 +1201,6 @@ pal_bright_table:
         .db     168, 196, 224, 252
         .db     252, 252, 252, 252
 
-; bright6_table: brightness 0..6, 6-bit channel value 0..63, pre-shifted RGB6<<2.
-; The 256-colour fade path (apply_palette_256) indexes [level*64 + v6]. Generated
-; to reproduce pal_bright_table exactly at the 2-bit anchors (v=0,21,42,63):
-;   level<=3: q = v*level/3 ;  level>3: q = v + (63-v)*(level-3)/3 ;  out = q<<2.
-; q is ROUNDED half-up (not floored): floor sent weak channels (v6<=1 at level 2,
-; v6<=2 at level 1) to black a whole fade step early, so muted/near-neutral pixels
-; visibly extinguished before brighter-channel neighbours of similar luma. Rounding
-; is exact at the anchors, so the 16-colour path / existing games are unaffected.
-bright6_table:
-        ; brightness 0
-        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
-        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
-        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
-        .db       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
-        ; brightness 1
-        .db       0,  0,  4,  4,  4,  8,  8,  8, 12, 12, 12, 16, 16, 16, 20, 20
-        .db      20, 24, 24, 24, 28, 28, 28, 32, 32, 32, 36, 36, 36, 40, 40, 40
-        .db      44, 44, 44, 48, 48, 48, 52, 52, 52, 56, 56, 56, 60, 60, 60, 64
-        .db      64, 64, 68, 68, 68, 72, 72, 72, 76, 76, 76, 80, 80, 80, 84, 84
-        ; brightness 2
-        .db       0,  4,  4,  8, 12, 12, 16, 20, 20, 24, 28, 28, 32, 36, 36, 40
-        .db      44, 44, 48, 52, 52, 56, 60, 60, 64, 68, 68, 72, 76, 76, 80, 84
-        .db      84, 88, 92, 92, 96,100,100,104,108,108,112,116,116,120,124,124
-        .db     128,132,132,136,140,140,144,148,148,152,156,156,160,164,164,168
-        ; brightness 3
-        .db       0,  4,  8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60
-        .db      64, 68, 72, 76, 80, 84, 88, 92, 96,100,104,108,112,116,120,124
-        .db     128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188
-        .db     192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252
-        ; brightness 4
-        .db      84, 88, 88, 92, 96, 96,100,104,104,108,112,112,116,120,120,124
-        .db     128,128,132,136,136,140,144,144,148,152,152,156,160,160,164,168
-        .db     168,172,176,176,180,184,184,188,192,192,196,200,200,204,208,208
-        .db     212,216,216,220,224,224,228,232,232,236,240,240,244,248,248,252
-        ; brightness 5
-        .db     168,168,172,172,172,176,176,176,180,180,180,184,184,184,188,188
-        .db     188,192,192,192,196,196,196,200,200,200,204,204,204,208,208,208
-        .db     212,212,212,216,216,216,220,220,220,224,224,224,228,228,228,232
-        .db     232,232,236,236,236,240,240,240,244,244,244,248,248,248,252,252
-        ; brightness 6
-        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
-        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
-        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
-        .db     252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252
-
         .area   _SDKDATA
         ; SDK mutable data, in the SRAM region (#1600). Saved video mode for the
         ; exit trampoline lives in SRAM #1AC8 (loader-filled), read by the
@@ -1226,8 +1219,8 @@ _pal_bright_level:
         .db     0
 _fine_bright_level:                             ; fine brightness 0..32 (32 = normal)
         .db     32
-fine_scale_table:                          ; 64-byte channel scale built per fade step
-        .ds     64
+pal_lut8:                                  ; 256-byte 8-bit brightness LUT for the
+        .ds     256                        ; 256-colour path, rebuilt per palette apply
 ; Active display palette tracking for the 256-colour path (§9.1). pal_select
 ; records which predefined palette is shown and whether it is 256-colour, so
 ; pal_bright can re-apply it (256-colour fade re-reads the asset, not a buffer).
@@ -1235,8 +1228,6 @@ _active_pal_id:
         .db     0
 _active_pal_is256:
         .db     0
-_bright6_base:                          ; bright6_table + level*64 (256-colour apply)
-        .dw     0
 _pal_saved_win3:
         .db     0
 _vram_saved_win3:

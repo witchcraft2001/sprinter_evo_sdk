@@ -333,22 +333,48 @@ static void confirm_quit(struct room2 *rm)
 	while(1)
 	{
 		inp=input_state();
-		if(inp!=0)
+		if(inp==0) continue;
+		// Esc = CS+Space приходит несведённым: Space часто замыкается на
+		// кадр раньше CapsShift и читается как одиночный JOY_FIRE. Без этой
+		// выдержки переходный кадр трактуется как "другая кнопка" -> возврат
+		// в игру, и выход срабатывает через раз. Даём аккорду дособраться.
+		if((inp&JOY_FIRE) && !(inp&INPUT_QUIT))
 		{
-			if(inp&INPUT_QUIT) quit_to_dss();
-			draw_room(rm);
-			swap_screen();
-			sprites_start();
-			delay(15);
-			return;
+			delay(2);
+			inp=input_state();
+			if(inp==0) continue;
 		}
+		if(inp&INPUT_QUIT) quit_to_dss();
+		draw_room(rm);
+		swap_screen();
+		sprites_start();
+		delay(15);
+		return;
 	}
 }
 #endif
 
 void title(void)
 {
-	
+#ifdef __SPRINTER__
+	// Заставка на Sprinter 256-цветная (sprinter/title.png): коэрцивный
+	// fade_from_black/fade_to_black (pal_bright, 4 шага) бандит и ПЕРЕМИГИВАЕТ --
+	// он дёргает swap_screen на каждом шаге, а картинка лежит только в одном
+	// буфере, поэтому видимый буфер скачет между заставкой и пустым. Делаем
+	// плавный фейд через pal_bright_fine (32 шага) БЕЗ swap во время фейда
+	// (идиома splash_sprinter из game_xnx). Палитру держим чёрной до swap.
+	static u8 i;
+	music_play(MUS_DIAMOND);
+	sprites_stop();
+	pal_select(PAL_TITLE);
+	pal_bright_fine(0);                                         // чёрная палитра для fade in
+	draw_image(0,0,IMG_TITLE);
+	swap_screen();                                             // показать заставку (ещё чёрную)
+	for(i=1;i<=16;++i){ pal_bright_fine(i<<1); delay(1); }      // fade in: 0 -> 32
+	while(input_state()==0);
+	sample_play(SMP_BELL);
+	for(i=1;i<=16;++i){ pal_bright_fine(32-(i<<1)); delay(1); } // fade out: 32 -> 0
+#else
 	music_play(MUS_DIAMOND);
 	sprites_stop();
 	pal_select(PAL_TITLE);
@@ -358,6 +384,7 @@ void title(void)
 	while(input_state()==0);
 	sample_play(SMP_BELL);
 	fade_to_black();
+#endif
 	clear_screen(1);
 	swap_screen();
 	clear_screen(1);
