@@ -667,7 +667,7 @@ def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int) 
     palette = list(base_pal[:16]) + [(0, 0, 0)] * (base_index - 16) + photo
     idx_pixels = bytes(pidx[resolve(c)] for c in px)
 
-    out = _RESERVED_TMPDIR / f"{override_path.stem}_b{base_index}.bmp"
+    out = _RESERVED_TMPDIR / f"{base_path.stem}_{override_path.stem}_b{base_index}.bmp"
     _write_indexed_bmp(out, w, h, idx_pixels, palette)
     return out
 

@@ -21,6 +21,8 @@ set palette.3=deep_one.bmp
 set palette.4=gameover.bmp
 set palette.5=title.bmp
 set palette.6=win.bmp
+set palette.8=scratch1.bmp
+set palette.9=scratch2.bmp
 rem список изображений, откуда брать графику
 
 set image.0=tiles.bmp
@@ -44,12 +46,27 @@ set sprinter_palette.0=sprinter\inventory.png
 set sprinter_image.4=sprinter\inventory.png
 set sprinter_palette.3=sprinter\deep_one.png
 set sprinter_image.7=sprinter\deep_one.png
+set sprinter_palette.8=sprinter\scratch1.png
 set sprinter_image.8=sprinter\scratch1.png
+set sprinter_palette.9=sprinter\scratch2.png
 set sprinter_image.9=sprinter\scratch2.png
 set sprinter_palette.5=sprinter\title.png
 set sprinter_image.13=sprinter\title.png
 set sprinter_palette.6=sprinter\win.png
 set sprinter_image.14=sprinter\win.png
+
+rem Sprinter: полноцветные экраны, поверх которых рисуется старый UI/текст,
+rem держат базовые 16 цветов в 0..15, а картинку -- в 16..255.
+set palette_base.0=16
+set palette_base.3=16
+set palette_base.4=16
+set palette_base.5=16
+set palette_base.7=16
+set palette_base.8=16
+set palette_base.9=16
+set palette_base.13=16
+set palette_base.6=16
+set palette_base.14=16
 rem спрайты
 
 set sprite.0=char.bmp

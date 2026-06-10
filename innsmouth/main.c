@@ -578,6 +578,9 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				delay(25);
 				clear_screen(2);
 				swap_screen();
+#ifdef __SPRINTER__
+				pal_select(PAL_SCRATCH1);
+#endif
 				draw_image(0,0,IMG_SCRATCH1);
 				swap_screen();
 				draw_image(0,0,IMG_SCRATCH1);
@@ -586,6 +589,9 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				delay(25);
 				clear_screen(2);
 				swap_screen();
+#ifdef __SPRINTER__
+				pal_select(PAL_SCRATCH2);
+#endif
 				draw_image(0,0,IMG_SCRATCH2);
 				swap_screen();
 				draw_image(0,0,IMG_SCRATCH2);
