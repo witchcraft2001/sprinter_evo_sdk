@@ -168,9 +168,9 @@ _sample_play::
         out     (c), a
 
         ; Arm IRQ-driven streaming: the #FF IM2 vector (_evo_cbl_irq) refills the
-        ; FIFO on each CBL half-empty event (proven HW path, cf. MK_OUTI). The
-        ; blocking foreground HALT-waits until the handler has fed the whole sample
-        ; plus the silence tail, matching EvoSDK's blocking sample_play semantics.
+        ; FIFO on each CBL half-empty event. The blocking foreground HALT-waits
+        ; until the handler has fed the whole sample plus the silence tail,
+        ; matching EvoSDK's blocking sample_play semantics.
         ld      a, #1
         ld      (_cbl_active), a
         ld      de, #4000               ; anti-hang guard: bail if no IRQ clears it
