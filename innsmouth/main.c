@@ -596,28 +596,48 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 			if(rm->triggers[triggernum].item_or_teleport==5)//попался к глубоководным
 			{
 				sprites_stop();
+#ifdef __SPRINTER__
+				// "Попался": вспышка экрана и полей, как в game_xnx при попадании
+				// на охотника -- pal_bright(MAX) overbright поднимает и фон/поля.
+				for(a=0;a<4;a++){ pal_bright(BRIGHT_MAX); delay(2); pal_bright(BRIGHT_MID); delay(2); }
+#endif
 				pal_select(PAL_DEEP_ONE);
+#ifdef __SPRINTER__
+				// Поля центровки держим чёрными всю сцену смерти: гасим ОБА буфера
+				// в индекс 0 (=чёрный во всех этих 256-цв палитрах) ПОСЛЕ выбора
+				// палитры смерти. draw_image пишет только 200 видимых строк, поэтому
+				// поля дальше не трогаются и остаются чёрными -- а не цвет очистки
+				// или прошлой картинки в чужой палитре (это давало синие/белые полосы).
+				clear_screen(0); swap_screen();
+				clear_screen(0); swap_screen();
+#endif
 				draw_image(0,0,IMG_DEEP_ONE);
 				swap_screen();
 				draw_image(0,0,IMG_DEEP_ONE);
 				swap_screen();
 				sample_play(SMP_DEEPONE);
 				delay(25);
-				clear_screen(2);
-				swap_screen();
 #ifdef __SPRINTER__
+				clear_screen(0);        // индекс 0 -> чёрные поля (не белый цвет (2))
+				swap_screen();
 				pal_select(PAL_SCRATCH1);
-#endif
-				draw_image(0,0,IMG_SCRATCH1);
-				swap_screen();
-				draw_image(0,0,IMG_SCRATCH1);
-				swap_screen();
-				sample_play(SMP_SLASH);
-				delay(25);
+#else
 				clear_screen(2);
 				swap_screen();
+#endif
+				draw_image(0,0,IMG_SCRATCH1);
+				swap_screen();
+				draw_image(0,0,IMG_SCRATCH1);
+				swap_screen();
+				sample_play(SMP_SLASH);
+				delay(25);
 #ifdef __SPRINTER__
+				clear_screen(0);
+				swap_screen();
 				pal_select(PAL_SCRATCH2);
+#else
+				clear_screen(2);
+				swap_screen();
 #endif
 				draw_image(0,0,IMG_SCRATCH2);
 				swap_screen();
@@ -625,6 +645,23 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				swap_screen();
 				sample_play(SMP_SLASH);
 				delay(25);
+#ifdef __SPRINTER__
+				// Плавный 32-шаговый fade out scratch2 (256-цв) БЕЗ swap -- иначе
+				// перемигивание между буферами и бандинг на 4-шаговом pal_bright.
+				for(a=1;a<=16;a++){ pal_bright_fine(32-(a<<1)); delay(2); }
+				delay(80);
+				// Gameover: поля уже чёрные (letterbox). Гасим в чёрный ДО pal_select
+				// (pal_bright(MIN) сбрасывает коэрцивный уровень, на котором грузится
+				// 256-цв палитра -> нет вспышки старых пикселей), затем плавный
+				// 32-шаговый fade in (sprinter/gameover.png 256-цветный).
+				pal_bright(BRIGHT_MIN);
+				pal_select(PAL_GAMEOVER);
+				draw_image(0,0,IMG_GAMEOVER);
+				swap_screen();
+				draw_image(0,0,IMG_GAMEOVER);
+				swap_screen();
+				for(a=1;a<=16;a++){ pal_bright_fine(a<<1); delay(2); }
+#else
 				for(a=4;a>0;a--)
 				{
 					pal_bright(a-1);
@@ -637,16 +674,39 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				pal_select(PAL_GAMEOVER);
 				draw_image(0,0,IMG_GAMEOVER);
 				swap_screen();
+#endif
 				while(input_state()==0);
 				sprites_start();
 				border(1);
 				clear_screen(1);
 				title();
+				music_play(MUS_DIAMOND2);   // вернуть игровую музыку (title() ставит MUS_DIAMOND)
 				game_begin(chr);
 			}
 			if(rm->triggers[triggernum].item_or_teleport==6)//конец
 			{
 				sprites_stop();
+#ifdef __SPRINTER__
+				// win 256-цветный: чёрные поля letterbox + плавный 32-шаговый фейд
+				// (pal_bright_fine), без swap во время фейда -- как gameover/title.
+				clear_screen(0); swap_screen();
+				clear_screen(0); swap_screen();
+				pal_select(PAL_WIN);
+				pal_bright_fine(0);                                        // чёрная палитра для fade in
+				draw_image(0,0,IMG_WIN);
+				swap_screen();
+				draw_image(0,0,IMG_WIN);
+				swap_screen();
+				for(a=1;a<=16;a++){ pal_bright_fine(a<<1); delay(2); }      // fade in: 0 -> 32
+				delay(100);
+				noredraw=2;
+				draw_text(rm,&end);                                        // концовка поверх (UI-цвета 0..15)
+				noredraw=1;
+				sprites_start();
+				for(a=1;a<=16;a++){ pal_bright_fine(32-(a<<1)); delay(2); } // fade out: 32 -> 0
+				border(1);
+				clear_screen(1);
+#else
 				pal_select(PAL_WIN);
 				draw_image(0,0,IMG_WIN);
 				swap_screen();
@@ -660,7 +720,9 @@ void activate_trigger(struct room2 *rm,character *chr,struct room2 **rooms,struc
 				border(1);
 				clear_screen(1);
 				fade_to_black();
+#endif
 				title();
+				music_play(MUS_DIAMOND2);   // вернуть игровую музыку (title() ставит MUS_DIAMOND)
 				game_begin(chr);
 			}
 

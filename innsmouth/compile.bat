@@ -54,6 +54,8 @@ set sprinter_palette.5=sprinter\title.png
 set sprinter_image.13=sprinter\title.png
 set sprinter_palette.6=sprinter\win.png
 set sprinter_image.14=sprinter\win.png
+set sprinter_palette.4=sprinter\gameover.png
+set sprinter_image.12=sprinter\gameover.png
 
 rem Sprinter: полноцветные экраны, поверх которых рисуется старый UI/текст,
 rem держат базовые 16 цветов в 0..15, а картинку -- в 16..255.
@@ -67,6 +69,7 @@ set palette_base.9=16
 set palette_base.13=16
 set palette_base.6=16
 set palette_base.14=16
+set palette_base.12=16
 rem спрайты
 
 set sprite.0=char.bmp
