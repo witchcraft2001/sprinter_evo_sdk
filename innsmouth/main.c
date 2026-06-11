@@ -13,6 +13,16 @@ static u8 noredraw;
 #define INPUT_ENTER 0x20
 #define INPUT_QUIT  0x40
 
+/* Vertical movement step. On Sprinter sprite X is in 2-pixel units (one james.x
+ * step = 2 screen px), so horizontal motion is 2 px/frame. Step Y by 2 as well
+ * to keep both axes at the same on-screen speed. Evo keeps the original 1-px Y
+ * step (VSTEP 1 leaves the bounds/movement behaviour byte-identical). */
+#ifdef __SPRINTER__
+#define VSTEP 2
+#else
+#define VSTEP 1
+#endif
+
 /* A/B are the primary action (Space/FIRE); C is Enter/inventory. */
 static u8 input_state(void)
 {
@@ -363,7 +373,7 @@ void title(void)
 	// буфере, поэтому видимый буфер скачет между заставкой и пустым. Делаем
 	// плавный фейд через pal_bright_fine (32 шага) БЕЗ swap во время фейда
 	// (идиома splash_sprinter из game_xnx). Палитру держим чёрной до swap.
-	static u8 i;
+	static u8 i,j;
 	music_play(MUS_DIAMOND);
 	sprites_stop();
 	pal_select(PAL_TITLE);
@@ -372,6 +382,14 @@ void title(void)
 	swap_screen();                                             // показать заставку (ещё чёрную)
 	for(i=1;i<=16;++i){ pal_bright_fine(i<<1); delay(1); }      // fade in: 0 -> 32
 	while(input_state()==0);
+	// Скрыть приглашение "Press FIRE to Start", оставив логотип и руку: фон под
+	// надписью -- сплошной чёрный, поэтому перерисовываем заставку в теневой
+	// буфер и закрашиваем полосу приглашения чёрным угловым тайлом самой
+	// картинки (тайл 0 = чёрный угол, цвет совпадает с фоном 1:1), затем показываем.
+	draw_image(0,0,IMG_TITLE);
+	select_image(IMG_TITLE);
+	for(i=19;i<=22;++i){ for(j=12;j<=28;++j) draw_tile(j,i,0); }
+	swap_screen();
 	sample_play(SMP_BELL);
 	for(i=1;i<=16;++i){ pal_bright_fine(32-(i<<1)); delay(1); } // fade out: 32 -> 0
 #else
@@ -931,26 +949,26 @@ void main(void)
     james.napr=1;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if((inp&JOY_UP)&& james.y>0)
+  if((inp&JOY_UP)&& james.y>=VSTEP)
   {
 
     //if(on_trig(curroom,james.x,0,james.x+1,james.y)!=1)	set_sprite(2,3,3,48);
 	//b=on_trig(curroom,james.x,0,james.x+1,james.y);
 	//if(b!=1)	set_sprite(2,curroom->triggers[b-5].x*8,curroom->triggers[b-5].y*16,48);
 	//else set_sprite(2,3,3,49);
-    if(check_walkness(curroom,james.x,0,james.x,james.y-1)==1)james.y--;
+    if(check_walkness(curroom,james.x,0,james.x,james.y-VSTEP)==1)james.y-=VSTEP;
     james.frame++;
     if(james.frame>=30)james.frame=0;
     james.napr=4;
 	check_triggers(curroom,&james,rooms,&curroom,0);
   }
-  if((inp&JOY_DOWN)&&james.y<184)
+  if((inp&JOY_DOWN)&&james.y<=184-VSTEP)
   {
     //if(on_trig(curroom,james.x,0,james.x+1,james.y)!=1)	set_sprite(2,3,3,48);
 	//b=on_trig(curroom,james.x,0,james.x+1,james.y);
 	//if(b!=1)	set_sprite(2,curroom->triggers[b-5].x*8,curroom->triggers[b-5].y*16,48);
 	//else set_sprite(2,3,3,49);
-    if(check_walkness(curroom,james.x,0,james.x,james.y+1)==1)james.y++;
+    if(check_walkness(curroom,james.x,0,james.x,james.y+VSTEP)==1)james.y+=VSTEP;
     james.frame++;
     if(james.frame>=30)james.frame=0;
     james.napr=2;
