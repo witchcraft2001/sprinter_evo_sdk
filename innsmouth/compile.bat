@@ -70,6 +70,12 @@ set palette_base.13=16
 set palette_base.6=16
 set palette_base.14=16
 set palette_base.12=16
+rem Sprinter: финальный экран (win) держит в 0..15 обычную UI-палитру тайлов, а не
+rem первые 16 цветов самого фото -- иначе диалог "Конец" наследует закатные цвета
+rem win.bmp (оранжевый фон). Фото лежит в 16..255 и не затрагивается. Нужно для
+rem обоих суффиксов (palette.6 и image.14), иначе палитра/картинка разъедутся.
+set palette_ui.6=tiles.bmp
+set palette_ui.14=tiles.bmp
 rem спрайты
 
 set sprite.0=char.bmp

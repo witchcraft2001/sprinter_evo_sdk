@@ -163,6 +163,30 @@ def parse_palette_base(path: Path) -> dict[str, int]:
     return out
 
 
+def parse_palette_ui(path: Path) -> dict[str, Path]:
+    """`set palette_ui.N=file` -> {N: Path}. For a Sprinter reserved-layout screen
+    (palette_base.N), supplies the base 16-colour palette for indices 0..15 from
+    `file` (e.g. the UI/font palette) INSTEAD of the screen's own base image. Lets
+    UI/text drawn over a 256-colour photo (win-screen `end` dialog) use the normal
+    in-game dialog colours rather than inheriting the photo's first 16 colours; the
+    photo itself lives in 16..255 and is unaffected. Keyed by the bare suffix N so
+    it applies to both image.N and palette.N. Evo ignores it."""
+    base = path.parent
+    out: dict[str, Path] = {}
+    for line in decode_text(path).splitlines():
+        if re.match(r"^\s*rem(?:\s|$)", line, re.IGNORECASE):
+            continue
+        match = SET_RE.match(line)
+        if not match:
+            continue
+        key, suffix, value = match.group(1).lower(), match.group(2), strip_bat_value(match.group(3))
+        if key != "palette_ui" or suffix is None or not value:
+            continue
+        normalized = value.replace("\\", os.sep).replace("/", os.sep)
+        out[suffix.lower()] = base / normalized
+    return out
+
+
 def parse_sprinter_overrides(path: Path) -> dict[str, Path]:
     base = path.parent
     overrides: dict[str, Path] = {}

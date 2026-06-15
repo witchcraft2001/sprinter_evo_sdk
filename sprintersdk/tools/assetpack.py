@@ -27,11 +27,13 @@ from pathlib import Path
 
 try:
     from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
-                        resource_name, bmp_sprite_count, warn, decode_text, png_ihdr)
+                        parse_palette_ui, resource_name, bmp_sprite_count, warn,
+                        decode_text, png_ihdr)
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from resgen import (parse_compile_bat, parse_sprinter_overrides, parse_palette_base,
-                        resource_name, bmp_sprite_count, warn, decode_text, png_ihdr)
+                        parse_palette_ui, resource_name, bmp_sprite_count, warn,
+                        decode_text, png_ihdr)
 
 import tempfile
 
@@ -626,17 +628,29 @@ def _write_indexed_bmp(path: Path, w: int, h: int, idx_pixels, palette256) -> No
     path.write_bytes(out)
 
 
-def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int) -> Path:
+def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int,
+                         ui_palette_path: Path | None = None) -> Path:
     """Build an 8bpp BMP whose palette is [base 16-colour palette at 0..15] +
     [override image's colours at base_index..255], with the override's pixels
     remapped accordingly (§9.1 palette partitioning). Colours beyond the 256-
     base_index budget are merged into their nearest kept colour (least-frequent
-    first). Returns the path to a temp BMP. Dimensions follow the override."""
+    first). Returns the path to a temp BMP. Dimensions follow the override.
+
+    If `ui_palette_path` is given (palette_ui.N), indices 1..15 come from THAT
+    file's palette instead of `base_path` -- so UI/text drawn over the photo (e.g.
+    the win-screen `end` dialog) uses the normal in-game palette. Index 0 is KEPT
+    from `base_path`: it is the SDK clear/letterbox/transparent colour (clear_screen
+    fills it, draw_image leaves the centring margins at it), so it must stay the
+    screen's own background (black) rather than the UI palette's index 0. The photo
+    always lands in base_index..255 and is unaffected either way."""
     global _RESERVED_TMPDIR
     if _RESERVED_TMPDIR is None:
         _RESERVED_TMPDIR = Path(tempfile.mkdtemp(prefix="evos_palbase_"))
 
     base_pal, _bp, _bw, _bh, _bb, _bt = read_image(base_path)  # base 16-colour palette
+    if ui_palette_path is not None:
+        ui_pal = read_image(ui_palette_path)[0]               # UI/font palette for 1..15
+        base_pal = list(base_pal[:1]) + list(ui_pal[1:16])    # keep clear colour at index 0
     opal, opix, w, h, _ob, _ot = read_image(override_path)
     px = [opal[i] for i in opix]                              # per-pixel RGB
 
@@ -667,7 +681,8 @@ def _reserved_layout_bmp(base_path: Path, override_path: Path, base_index: int) 
     palette = list(base_pal[:16]) + [(0, 0, 0)] * (base_index - 16) + photo
     idx_pixels = bytes(pidx[resolve(c)] for c in px)
 
-    out = _RESERVED_TMPDIR / f"{base_path.stem}_{override_path.stem}_b{base_index}.bmp"
+    ui_tag = f"_ui{ui_palette_path.stem}" if ui_palette_path is not None else ""
+    out = _RESERVED_TMPDIR / f"{base_path.stem}_{override_path.stem}_b{base_index}{ui_tag}.bmp"
     _write_indexed_bmp(out, w, h, idx_pixels, palette)
     return out
 
@@ -682,6 +697,7 @@ def apply_sprinter_overrides(entries: dict, manifest: Path) -> None:
     if not overrides:
         return
     pal_base = parse_palette_base(manifest)          # {suffix N: base index}
+    pal_ui = parse_palette_ui(manifest)              # {suffix N: UI-palette source}
     for kind in ("palette", "image", "sprite"):
         resolved = []
         for var_name, path in entries[kind]:
@@ -705,7 +721,7 @@ def apply_sprinter_overrides(entries: dict, manifest: Path) -> None:
             suffix = var_name.split(".", 1)[1] if "." in var_name else ""
             base_index = pal_base.get(suffix)
             if base_index is not None and kind in ("palette", "image"):
-                ov = _reserved_layout_bmp(path, ov, base_index)
+                ov = _reserved_layout_bmp(path, ov, base_index, pal_ui.get(suffix))
             resolved.append((var_name, ov))
         entries[kind] = resolved
 
