@@ -57,6 +57,10 @@ set sprinter_image.14=sprinter\win.png
 set sprinter_palette.4=sprinter\gameover.png
 set sprinter_image.12=sprinter\gameover.png
 
+rem Sprinter-only логотип-заставка (нет базы на Evo -> sprinter_only_*; PNG, 30 цв.)
+set sprinter_only_palette.20=sprinter\sprinterLogo.png
+set sprinter_only_image.20=sprinter\sprinterLogo.png
+
 rem Sprinter: полноцветные экраны, поверх которых рисуется старый UI/текст,
 rem держат базовые 16 цветов в 0..15, а картинку -- в 16..255.
 set palette_base.0=16

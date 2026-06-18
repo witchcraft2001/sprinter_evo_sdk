@@ -333,10 +333,10 @@ static void confirm_quit(struct room2 *rm)
 	put_str("Нажмите Esc/Start для выхода");
 	output_x=7;
 	output_y=11;
-	put_str("или другую кнопку");
-	output_x=9;
+	put_str("или другую кнопку для");
+	output_x=13;
 	output_y=12;
-	put_str("для продолжения");
+	put_str("продолжения");
 	swap_screen();
 	sample_play(SMP_SWITCH);
 	while(input_state()!=0);
@@ -886,19 +886,53 @@ u8 inventory(struct room2 *rm,character* chr)
 	fade_from_black();
 	return c;
 }
+#ifdef __SPRINTER__
+// Sprinter-only boot splash: показать логотип Sprinter с fade in, паузой ~2 с и
+// fade out, затем управление уходит к штатной заставке игры. Логотип 256-цветный
+// (sprinter_only_image/palette), поэтому фейд через pal_bright_fine (32 шага).
+void splash_sprinter(void)
+{
+	static u8 i;
+
+	// Сначала погасить то, что осталось от загрузчика: обнулить палитру и стереть
+	// оба буфера, иначе старый кадр/палитра дают артефакты при загрузке PAL_SPRINTERLOGO.
+	pal_clear();
+	clear_screen(0); swap_screen();
+	clear_screen(0); swap_screen();
+
+	// Теперь инициализировать палитру логотипа (держим чёрной для fade in) и вывести его.
+	pal_select(PAL_SPRINTERLOGO);
+	pal_bright_fine(0);
+	draw_image(0,0,IMG_SPRINTERLOGO);   // полноэкранный вывод (320x200 = 40x25 тайлов)
+	swap_screen();
+
+	for(i=1;i<=16;++i){ pal_bright_fine(i<<1); delay(1); }       // fade in: 0 -> 32
+	delay(100);                                                 // пауза ~2 с (50 Гц)
+	for(i=1;i<=16;++i){ pal_bright_fine(32-(i<<1)); delay(1); }  // fade out: 32 -> 0
+
+	// Стереть логотип с ОБОИХ буферов (палитра ещё чёрная), иначе при загрузке
+	// палитры следующей заставки мелькнут старые пиксели чужими цветами.
+	clear_screen(0); swap_screen();
+	clear_screen(0); swap_screen();
+}
+#endif
+
 void main(void)
 {
-  
+
   static u8 i;
   static u8 xx,yy,a,b,c;
   static u8 inp;
   static u8 palette[16];
-  
+
   character james;
   //struct room2 rm;
   struct room2 *rooms[16];
-  
+
   //rm.l1_elements=m1_l1_elements;
+#ifdef __SPRINTER__
+  splash_sprinter();                  // заставка Sprinter перед штатной заставкой (один раз)
+#endif
   title();
  
   border(1);
