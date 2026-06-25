@@ -29,6 +29,8 @@
         .globl  _pal_copy
         .globl  _pal_col
         .globl  _pal_custom
+        .globl  _pal_load256
+        .globl  _pal_set256
         .globl  _clear_screen
 
         ; --- shared helpers exported to lib_tiles.asm ---
@@ -659,6 +661,7 @@ fill_row_320:
 _pal_clear::
         xor     a
         ld      (_active_pal_is256), a  ; cleared palette uses the 16-colour path
+        ld      (_active_pal_is_cptr), a
         ld      hl, #_palette
         ld      b, #16
         xor     a
@@ -709,14 +712,22 @@ _pal_bright::
         jr      nz, pal_bright_256
         jp      apply_palette_all
 pal_bright_256:
-        ; 256-colour fade: re-read the active palette asset and re-apply it
-        ; scaled by the new brightness (no 256-entry SRAM buffer needed).
+        ; 256-colour fade: re-read the active palette and re-apply it scaled by the
+        ; new brightness (no 256-entry SRAM buffer needed).
+        ld      a, (_active_pal_is_cptr)
+        or      a
+        jr      nz, pal_bright_256_cptr
         ld      a, (_active_pal_id)
         call    map_palette_page        ; HL = payload, WIN1 saved
         call    apply_palette_256
         ld      a, (_pal_saved_win1)
         out     (#0xA2), a              ; restore WIN1
         ret
+pal_bright_256_cptr:
+        ; source is a flat C buffer (pal_load256): re-apply from the saved pointer.
+        call    build_coarse_lut        ; pal_lut8 for the new _pal_bright_level
+        ld      hl, (_active_pal_cptr)
+        jp      apply_palette_256_run_flat
 
 ; pal_bright_fine(u8 level): fine-grained brightness, level = 0..32 (32 = normal,
 ; full colour; 0 = black). Sprinter-only extension for smooth fades -- the coarse
@@ -761,12 +772,21 @@ _pal_bright_fine::
         ld      (_pal_bright_level), a
         jp      apply_palette_all
 pal_bright_fine_256:
+        ld      a, (_active_pal_is_cptr)
+        or      a
+        jr      nz, pal_bright_fine_256_cptr
         ld      a, (_active_pal_id)
         call    map_palette_page        ; HL = payload, WIN1 saved
         call    apply_palette_256_fine
         ld      a, (_pal_saved_win1)
         out     (#0xA2), a              ; restore WIN1
         ret
+pal_bright_fine_256_cptr:
+        ; flat C buffer (pal_load256): build the fine LUT and re-apply from pointer.
+        ld      a, (_fine_bright_level)
+        call    build_lut_fine          ; A = level -> pal_lut8
+        ld      hl, (_active_pal_cptr)
+        jp      apply_palette_256_run_flat
 
 _pal_col::
         ld      hl, #2
@@ -781,7 +801,8 @@ _pal_col::
         add     hl, bc
         ld      (hl), a                 ; store color into _palette[id]
         xor     a
-        ld      (_active_pal_is256), a  ; back to the 16-colour display path
+        ld      (_active_pal_is256), a  ; back to the 16-entry RGB222 update path
+        ld      (_active_pal_is_cptr), a
         jp      apply_palette_all       ; re-apply whole palette
 
 _pal_custom::
@@ -795,7 +816,8 @@ _pal_custom::
         ld      bc, #16
         ldir
         xor     a
-        ld      (_active_pal_is256), a  ; back to the 16-colour display path
+        ld      (_active_pal_is256), a  ; back to the 16-entry RGB222 update path
+        ld      (_active_pal_is_cptr), a
         jp      apply_palette_all
 
 _pal_copy::
@@ -819,6 +841,10 @@ _pal_select::
         add     hl, sp
         ld      a, (hl)                 ; palette id
         ld      (_active_pal_id), a     ; remember for pal_bright re-apply
+        push    af
+        xor     a
+        ld      (_active_pal_is_cptr), a ; source is a paged asset, not a C buffer
+        pop     af
         call    map_palette_page        ; HL = payload in WIN1, WIN1 saved
         ; payload = [u16 count][...]; count high byte != 0  =>  256-colour
         inc     hl
@@ -840,6 +866,71 @@ pal_select_256:
         call    apply_palette_256       ; HL = payload; writes all 256 entries
         ld      a, (_pal_saved_win1)
         out     (#0xA2), a              ; restore WIN1
+        ret
+
+; void pal_load256(const void *pal): apply a full 256-colour palette from a flat C
+; buffer (256 * (R8,G8,B8) = 768 bytes, no count prefix), at full 8-bit depth
+; scaled by the current coarse brightness. Marks the 256-colour path active and is
+; a C-buffer source, so pal_bright[_fine] re-apply from the saved pointer.
+_pal_load256::
+        ld      hl, #2
+        add     hl, sp
+        ld      e, (hl)
+        inc     hl
+        ld      d, (hl)                 ; DE = pal pointer
+        ld      (_active_pal_cptr), de
+        ld      a, #1
+        ld      (_active_pal_is256), a
+        ld      (_active_pal_is_cptr), a
+        call    build_coarse_lut        ; pal_lut8 for current _pal_bright_level
+        ld      hl, (_active_pal_cptr)
+        jp      apply_palette_256_run_flat   ; HL = first triple; writes 256, ret
+
+; void pal_set256(u8 index, u8 r, u8 g, u8 b): set one 256-colour entry at full
+; 8-bit depth. Channels pass through pal_lut8 (current brightness), so the entry
+; matches any active fade. Leaves the 16/256 mode flags untouched. Precondition:
+; a 256-colour palette is active (pal_lut8 built by the last pal_select/pal_load256/
+; pal_bright). Overwritten on the next full palette apply.
+_pal_set256::
+        push    ix
+        ld      ix, #4
+        add     ix, sp                  ; IX -> args (index,r,g,b); +2 for pushed IX
+        in      a, (#0xE2)
+        ld      (_pal_saved_win3), a
+        ld      a, #VRAM_PAGE
+        out     (#0xE2), a              ; WIN3 = #50 for #C3Ex
+        ld      a, 0 (ix)               ; index
+        out     (#0x89), a              ; PORT_Y = index
+        ld      de, #pal_lut8
+        ld      a, 1 (ix)               ; R8
+        ld      l, a
+        ld      h, #0
+        add     hl, de
+        ld      a, (hl)
+        ld      (#0xC3E0), a
+        ld      (#0xC3E4), a
+        ld      a, 2 (ix)               ; G8
+        ld      l, a
+        ld      h, #0
+        add     hl, de
+        ld      a, (hl)
+        ld      (#0xC3E1), a
+        ld      (#0xC3E5), a
+        ld      a, 3 (ix)               ; B8
+        ld      l, a
+        ld      h, #0
+        add     hl, de
+        ld      a, (hl)
+        ld      (#0xC3E2), a
+        ld      (#0xC3E6), a
+        xor     a
+        ld      (#0xC3E3), a
+        ld      (#0xC3E7), a
+        ld      a, #0xC0
+        out     (#0x89), a              ; PORT_Y back to default
+        ld      a, (_pal_saved_win3)
+        out     (#0xE2), a              ; restore WIN3
+        pop     ix
         ret
 
 copy_palette_payload:
@@ -978,16 +1069,23 @@ write_palette_entry:
 ;   _pal_bright_level (curve identical to the old bright6_table at MID/anchors).
 apply_palette_256:
         push    hl                      ; save payload pointer
-        ; coarse 0..6 -> pal_lut8 (8-bit). level<=3 darken: lut[i]=round(i*level/3).
-        ; level>3 brighten: lut[i]=round(i+(255-i)*(level-3)/3)
-        ;   = round((i*(6-level) + 255*(level-3))/3)  -> step=6-level, q0=85*(level-3).
+        call    build_coarse_lut        ; pal_lut8 for current _pal_bright_level
+        pop     hl                      ; HL = payload again
+        jr      apply_palette_256_run
+
+; build_coarse_lut: build pal_lut8 from _pal_bright_level (coarse 0..6).
+;   level<=3 darken: lut[i]=round(i*level/3). level>3 brighten:
+;   lut[i]=round(i+(255-i)*(level-3)/3) = round((i*(6-level)+255*(level-3))/3)
+;   -> step=6-level, q0=85*(level-3). MID(3) -> identity (full 8-bit precision).
+;   Clobbers A, B, C, D, E, HL.
+build_coarse_lut:
         ld      a, (_pal_bright_level)
         cp      #4
-        jr      nc, ap256_bright
+        jr      nc, bcl_bright
         ld      c, a                    ; step = level
         ld      d, #0                   ; q0 = 0
-        jr      ap256_build
-ap256_bright:
+        jr      bcl_build
+bcl_bright:
         ld      b, a                    ; save level
         ld      a, #6
         sub     b
@@ -999,10 +1097,8 @@ ap256_bright:
         ld      hl, #q0_85k
         add     hl, de
         ld      d, (hl)                 ; q0 = 85*k
-ap256_build:
-        call    build_lut_div3          ; C=step, D=q0 -> pal_lut8
-        pop     hl                      ; HL = payload again
-        jr      apply_palette_256_run
+bcl_build:
+        jp      build_lut_div3          ; C=step, D=q0 -> pal_lut8 (tail call)
 
 q0_85k:
         .db     0, 85, 170, 255         ; 85*k for k = 0..3
@@ -1016,11 +1112,14 @@ apply_palette_256_fine:
         ; fall through to the shared writer
 
 apply_palette_256_run:
+        ; HL = EVOS PAL payload ([u16 count][triples]); skip the count prefix.
+        inc     hl
+        inc     hl
+apply_palette_256_run_flat:
+        ; HL = first RGB triple (flat 256*(R8,G8,B8), no count prefix).
         push    ix
         push    hl
-        pop     ix
-        inc     ix
-        inc     ix                      ; IX = first RGB triple (skip count)
+        pop     ix                      ; IX = first RGB triple
         in      a, (#0xE2)
         ld      (_pal_saved_win3), a
         ld      a, #VRAM_PAGE
@@ -1228,6 +1327,12 @@ _active_pal_id:
         .db     0
 _active_pal_is256:
         .db     0
+; pal_load256 source: when set, the active 256-colour palette lives in a flat C
+; buffer (pointer below), not a paged asset. pal_bright[_fine] re-applies from it.
+_active_pal_is_cptr:
+        .db     0
+_active_pal_cptr:
+        .dw     0
 _pal_saved_win3:
         .db     0
 _vram_saved_win3:
