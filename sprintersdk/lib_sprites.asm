@@ -310,6 +310,10 @@ render_base_ok:
         out     (#0xE2), a
 
 draw_loop:
+        .if SAMPLE_ASYNC
+        ei                              ; open an IRQ window (CBL refill / music) for
+        .endif                          ; the non-accel per-sprite setup below; DI is
+                                        ; re-asserted just before the accel blit.
         ld      a, 0 (iy)               ; idh, #FF = end of queue
         cp      #0xFF
         jp      z, draw_done
@@ -371,6 +375,9 @@ draw_loop:
 
         pop     de                      ; DE = dest
         ld      a, b                    ; A = py (PORT_Y)
+        .if SAMPLE_ASYNC
+        di                              ; close the IRQ window before the accel blit
+        .endif
         call    blit_one_16x16
 
 draw_next:
@@ -388,6 +395,9 @@ draw_skip:
         jp      draw_loop
 
 draw_done:
+        .if SAMPLE_ASYNC
+        di                              ; structural cleanup runs with IRQs off
+        .endif
         ld      a, #0xC0
         out     (#0x89), a
         ld      a, (_spr_win3)
@@ -434,6 +444,9 @@ restore_after_base_ok:
         ld      a, #VRAM_PAGE
         out     (#0xE2), a
         call    restore_saved_rects
+        .if SAMPLE_ASYNC
+        di                              ; loop may have left IRQs on; cleanup runs DI
+        .endif
 
         ld      a, #0xC0
         out     (#0x89), a
@@ -462,6 +475,9 @@ saved_base_hl:
 restore_saved_rects:
         ld      b, #64
 restore_loop:
+        .if SAMPLE_ASYNC
+        ei                              ; IRQ window during the non-accel rect setup
+        .endif
         ld      a, 0 (ix)               ; valid
         or      a
         jr      z, restore_next
@@ -476,6 +492,9 @@ restore_loop:
         ld      de, (_spr_base)
         add     hl, de                  ; HL = VRAM column (x_px)
         ld      a, 1 (ix)               ; py
+        .if SAMPLE_ASYNC
+        di                              ; close the IRQ window before the accel copy
+        .endif
         call    restore_one_16x16
 restore_next:
         ld      de, #SSTRIDE

@@ -909,12 +909,18 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
 
     # --- palettes / music / samples / sfx: packed, never split an entry
     #     across a page boundary (so page+offset addressing is exact) ---
-    def pack_region(items, base_page, *, align_each=False):
+    def pack_region(items, base_page, *, align_each=False, align=1):
         blob = bytearray()
         table = []
         for data in items:
             if align_each and len(blob) % PAGE:
                 _pad_to_page(blob)
+            # Start each item on an `align`-byte boundary within its page. For CBL
+            # samples (align=128) this lets the IRQ refill stream 128-byte bursts by
+            # OUTI straight from paged VRAM with a page-cross check only ONCE per
+            # burst (PAGE=16384 is 128-divisible, so a burst never straddles a page).
+            if align > 1 and len(blob) % align:
+                blob += b"\x80" * (align - len(blob) % align)   # #80 = CBL silence
             if len(blob) % PAGE + len(data) > PAGE and len(data) <= PAGE:
                 _pad_to_page(blob)
             table.append((base_page + len(blob) // PAGE, len(blob) % PAGE, len(data)))
@@ -937,7 +943,7 @@ def build_paged(manifest: Path) -> tuple[bytes, bytes]:
         smp_items.append(pcm)
         smp_cbl.append(cbl_ctrl_for_rate(rate))
     smp_base = mus_base + len(mus_blob) // PAGE
-    smp_blob, smp_tab = pack_region(smp_items, smp_base)
+    smp_blob, smp_tab = pack_region(smp_items, smp_base, align=128)
 
     sfx_items = []
     if soundfx is not None:

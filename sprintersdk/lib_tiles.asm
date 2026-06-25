@@ -570,7 +570,13 @@ sync_bit:
         rr      c
         jr      nc, sync_bit_next
         push    bc
-        call    sync_one_cell
+        .if SAMPLE_ASYNC
+        di                              ; DI only around the accel cell-copy; the
+        .endif                          ; bitmap walk between cells runs with IRQs on
+        call    sync_one_cell           ; (HL/BC preserved by the IM2 handlers) so the
+        .if SAMPLE_ASYNC                ; CBL refill IRQ is never starved by a long DI
+        ei
+        .endif
         pop     bc
 sync_bit_next:
         ld      a, (_sync_x)

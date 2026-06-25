@@ -110,6 +110,10 @@ _music_stop::
 ; FIFO (256 bytes). Samples may cross 16K logical pages.
 ; -------------------------------------------------------------------------
 _sample_play::
+        .if SAMPLE_ASYNC
+        xor     a
+        ld      (_cbl_async), a         ; blocking: ISR must NOT self-finalize
+        .endif
         ld      hl, #2
         add     hl, sp
         ld      a, (hl)                 ; sample id
@@ -202,6 +206,76 @@ sample_drain_halt:
         out     (#SLOT3), a
         ret
 
+        .if SAMPLE_ASYNC
+; -------------------------------------------------------------------------
+; void sample_play_async(u8 sample)  [Sprinter-only, opt-in SAMPLE_ASYNC=1]
+; Arm IRQ-driven CBL streaming and return immediately -- the #FF ISR feeds the
+; FIFO in the background while the game and music keep running, and switches CBL
+; to idle when the sample + silence tail have drained. Re-arming while a sample
+; is active restarts playback (latest wins). Mirrors the blocking arm sequence.
+; -------------------------------------------------------------------------
+_sample_play_async::
+        ld      a, #1
+        ld      (_cbl_async), a         ; ISR self-finalizes (CBL idle) on drain
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)                 ; sample id
+        call    sample_record_a         ; HL -> record, carry if missing
+        ret     c
+
+        ld      a, (hl)                 ; logical page
+        ld      (_cbl_logical_page), a
+        inc     hl
+        ld      e, (hl)
+        inc     hl
+        ld      d, (hl)                 ; DE = offset inside logical page
+        inc     hl
+        ld      c, (hl)
+        inc     hl
+        ld      b, (hl)                 ; BC = sample length
+        inc     hl
+        ld      a, (hl)                 ; CBL mode byte (#D9/#DA/#DB)
+        or      a
+        jr      nz, 1$
+        ld      a, #0x99                ; defensive default: mono 8-bit, INT, 11 kHz
+1$:
+        ld      (_cbl_ctrl), a
+
+        ld      a, b
+        or      c
+        ret     z                       ; empty sample -> nothing to arm
+
+        ld      (_cbl_sample_remaining), bc
+
+        ld      hl, #0xC000             ; sample ptr = #C000 + 128-aligned offset
+        add     hl, de                  ; (uses DE=offset before it is reused below)
+        ld      (_cbl_sample_ptr), hl
+
+        call    compute_silence_tail_bc ; BC=len -> HL=tail bytes (pad + 1 FIFO=256)
+        ld      de, #256                ; async: +1 FIFO -> 2 FIFOs (512) of #80 total.
+        add     hl, de                  ; idle fires when the last byte is QUEUED, so
+        ld      (_cbl_tail_remaining), hl ; the DAC (up to 256 behind) must have already
+                                        ; played 1 full FIFO of #80 -> 2 FIFOs is the
+                                        ; minimum for a settled DAC (1 FIFO clicked).
+
+        di
+        in      a, (#SLOT3)
+        ld      (_cbl_saved_win3), a    ; (unused by async cleanup; ISR keeps its own)
+        ld      bc, #CBL_CTRL
+        xor     a
+        out     (c), a                  ; CBL off
+        call    cbl_flush_256
+        ld      a, (_cbl_logical_page)
+        call    map_logical_page_win3
+        ld      bc, #CBL_CTRL
+        ld      a, (_cbl_ctrl)
+        out     (c), a                  ; CBL on at the sample rate (bit4 -> #FE.7)
+        ld      a, #1
+        ld      (_cbl_active), a        ; ISR streams from here
+        ei
+        ret                             ; armed; return to the game immediately
+        .endif
+
 ; _evo_cbl_irq: IM2 vector #FF (shared by the video/keyboard IRQ and CBL). If a
 ; sample is streaming and #FE.bit7 (CBL_IND = CNT7^WA7, half-FIFO) is set, this is
 ; a CBL half-empty event -> refill 128 bytes; otherwise it is a plain video IRQ ->
@@ -236,6 +310,21 @@ _evo_cbl_irq::
         ld      a, h
         or      l
         jr      nz, cbl_irq_busy
+        ; Sample + silence tail fully streamed. The async tail is padded to >= 2
+        ; FIFOs of #80 (see sample_play_async), so by now the FIFO is full of #80
+        ; AND the DAC has already played out #80 -- it has settled to the silent
+        ; level. Idling here (#99 -> #80 rate change) is therefore inaudible: the
+        ; output value does not move and the FIFO holds only #80. No FIFO underrun
+        ; (we never stop feeding it before idle), which is what clicked before.
+        .if SAMPLE_ASYNC
+        ld      a, (_cbl_async)
+        or      a
+        jr      z, cbl_done_now         ; blocking: foreground drains + idles
+        ld      bc, #CBL_CTRL
+        ld      a, #CBL_IDLE
+        out     (c), a
+cbl_done_now:
+        .endif
         xor     a
         ld      (_cbl_active), a
 cbl_irq_busy:
@@ -436,6 +525,33 @@ cbl_flush_256:
 ; once per burst (and on the rare 16K page-cross) instead of the old per-byte
 ; load+store of _cbl_sample_remaining/_cbl_sample_ptr.
 cbl_stream_128:
+        .if SAMPLE_ASYNC
+        ; Fast paths -- a full 128-byte burst avoids the ~92 T/byte loop below:
+        ;  * sample data (>=128 left): 16x(8xOUTI) from the 128-aligned source;
+        ;  * silence tail (>=128 left): 16x(8x OUT(C),A) of #80, no source read.
+        ; The partial last burst of each (1..127) and the 16K page-cross fall to
+        ; the byte loop. OUTI/OUT are valid for CBL (FPGA decodes only low port byte
+        ; #4F; B is a don't-care -- and for OUT it doubles as the group counter).
+        ld      de, (_cbl_sample_remaining)
+        ld      a, d
+        or      a
+        jr      nz, cbl_outi_burst      ; sample >=256 -> OUTI burst
+        ld      a, e
+        or      a
+        jr      z, cbl_silence_check    ; sample drained -> silence fast path
+        cp      #128
+        jr      nc, cbl_outi_burst      ; sample 128..255 -> OUTI burst
+        jr      cbl_stream_byte         ; sample 1..127 -> byte path (partial)
+cbl_silence_check:
+        ld      de, (_cbl_tail_remaining)
+        ld      a, d
+        or      a
+        jp      nz, cbl_silence_burst   ; tail >=256 -> full #80 burst (jp: out of jr range)
+        ld      a, e
+        cp      #128
+        jp      nc, cbl_silence_burst   ; tail 128..255 -> full #80 burst
+cbl_stream_byte:
+        .endif
         ld      bc, #0x004F             ; B=0 (addr-hi), C=#4F (CBL_DATA)
         ld      hl, (_cbl_sample_ptr)
         ld      de, (_cbl_sample_remaining)
@@ -489,6 +605,81 @@ silence_loop:
 silence_done:
         ld      (_cbl_tail_remaining), de
         ret
+
+        .if SAMPLE_ASYNC
+; cbl_outi_burst: stream exactly one full 128-byte burst from the paged source via
+; 16 groups of 8 OUTI. In: DE = _cbl_sample_remaining (>=128). The source pointer
+; (_cbl_sample_ptr) is 128-aligned (assetpack), so a 128 burst never straddles a
+; 16K page mid-way -- it only ever ends exactly at #FFFF, wrapping HL to #0000,
+; which the next call's H==0 test remaps. The DEC D/JR pacing between groups is
+; required: a flat 128xOUTI is too aggressive for real CBL (modplay note).
+cbl_outi_burst:
+        ld      hl, (_cbl_sample_ptr)
+        ld      a, h
+        or      a
+        jr      nz, cob_no_remap        ; H!=0 -> burst stays inside the current page
+        push    de                      ; HL wrapped last burst -> map the next page
+        ld      hl, #_cbl_logical_page
+        inc     (hl)
+        ld      a, (hl)
+        call    map_logical_page_win3   ; clobbers A/DE/HL (DE saved, HL reset below)
+        pop     de
+        ld      hl, #0xC000
+cob_no_remap:
+        push    de                      ; save remaining across the burst
+        ld      c, #0x4F                ; CBL_DATA low; B=0 addr-hi (don't-care for CBL)
+        ld      b, #0
+        ld      d, #16                  ; 16 groups x 8 OUTI = 128 bytes
+cob_loop:
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        outi
+        dec     d                       ; pacing between groups (NOT a flat unroll)
+        jr      nz, cob_loop
+        pop     de                      ; remaining -= 128
+        ld      a, e
+        sub     #128
+        ld      e, a
+        jr      nc, cob_store
+        dec     d
+cob_store:
+        ld      (_cbl_sample_remaining), de
+        ld      (_cbl_sample_ptr), hl   ; HL advanced 128 by OUTI (=#0000 at page end)
+        ret
+
+; cbl_silence_burst: stream one full 128-byte burst of #80 silence (the tail). In:
+; DE = _cbl_tail_remaining (>=128). No source read, so OUT(C),A beats OUTI; B is
+; both the addr-hi (don't-care) and the 16-group counter (OUT does not touch B,
+; unlike OUTI). Same DEC/JR pacing per group as the sample burst.
+cbl_silence_burst:
+        ld      c, #0x4F                ; CBL_DATA low byte
+        ld      a, #0x80                ; centre level (silence)
+        ld      b, #16                  ; 16 groups x 8 = 128 bytes
+csb_loop:
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        out     (c), a
+        dec     b                       ; pacing between groups
+        jr      nz, csb_loop
+        ld      a, e                    ; tail -= 128
+        sub     #128
+        ld      e, a
+        jr      nc, csb_store
+        dec     d
+csb_store:
+        ld      (_cbl_tail_remaining), de
+        ret
+        .endif
 
 _sound_tick::
         ld      a, (_music_active)
@@ -610,5 +801,9 @@ _cbl_ctrl:
         .db     0
 _cbl_active:                            ; 1 while a sample is streaming (IRQ-driven)
         .db     0
+        .if SAMPLE_ASYNC
+_cbl_async:                             ; 1 = async (ISR finalizes), 0 = blocking
+        .db     0
+        .endif
 _cbl_irq_saved_win3:                    ; WIN3 saved/restored inside the CBL IRQ
         .db     0

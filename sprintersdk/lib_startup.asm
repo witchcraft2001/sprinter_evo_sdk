@@ -173,6 +173,10 @@ im2_sound_setup:
         out     (#CTC_CH3), a
         xor     a
         out     (#CTC_CH0), a           ; CTC interrupt vector base = 0
+        .if SAMPLE_ASYNC
+        inc     a
+        ld      (_snd_irq_ready), a     ; IM2 vectors live -> fill loops may now EI
+        .endif
         ei
         ret
 
@@ -633,7 +637,14 @@ fill_row_320:
         ld      c, c                    ; accel: horizontal fill mode
         ld      a, c
         ld      (hl), a                 ; accel fire: first 160 bytes
-        ld      b, b                    ; accel off (stay DI: Phase 1 has no IRQ handler)
+        ld      b, b                    ; accel off
+        .if SAMPLE_ASYNC
+        ld      a, (_snd_irq_ready)     ; EI only once IM2 is live (NOT during init's
+        or      a                       ; clear_both_buffers_black -- no vectors yet)
+        jr      z, 2$
+        ei                              ; IRQ window between accel fills (async refill)
+2$:
+        .endif
 
         ld      a, #160
         add     a, l
@@ -648,6 +659,13 @@ fill_row_320:
         ld      a, c
         ld      (hl), a                 ; accel fire: second 160 bytes
         ld      b, b
+        .if SAMPLE_ASYNC
+        ld      a, (_snd_irq_ready)
+        or      a
+        jr      z, 3$
+        ei                              ; IRQ window before the next row / caller
+3$:
+        .endif
 
         pop     hl
         ret
@@ -1306,6 +1324,10 @@ pal_bright_table:
         ; shutdown launcher before CACHE off.
 _screen_active:
         .db     0
+        .if SAMPLE_ASYNC
+_snd_irq_ready:                         ; 0 until im2_sound_setup installs IM2 vectors;
+        .db     0                       ; gates the narrowed-DI EI in the fill loop
+        .endif
 _time_counter:
         .db     0, 0, 0, 0
 _rand_seed1:
