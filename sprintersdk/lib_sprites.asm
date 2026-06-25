@@ -29,6 +29,9 @@
         .globl  _sprites_render_before_swap
         .globl  _sprites_restore_after_swap
         .globl  _sprites_active         ; read by lib_tiles to gate tile-sync
+        .if SPRITE16
+        .globl  _draw_sprite16          ; opt-in immediate-mode 16x16 blit (SPRITE16=1)
+        .endif
 
         .area   _SDK
 
@@ -94,6 +97,101 @@ _set_sprite::
 
         pop     iy
         ret
+
+        .if SPRITE16
+; -------------------------------------------------------------------------
+; void draw_sprite16(u16 x, u8 y, u16 spr, u8 flags)   [Sprinter-only, opt-in]
+; Immediate-mode masked accel blit of one 16x16 cell straight into the HIDDEN
+; buffer at pixel coordinates -- NO queue slot, NO 64-sprite limit. Reuses the
+; engine's blit_one_16x16 through a VRAM-ONLY page (#5C transparent / #54 opaque)
+; so the DRAM mirror (used by the tile- and sprite-list restore paths) stays
+; clean. The background is NOT auto-restored: the caller redraws it every frame
+; (hybrid render). flags bit0: 0 = transparent (skip index 255), 1 = opaque.
+; spr 0..255. Fully off-screen (x>=305 or py+16>256) is skipped, like the list.
+; Enabled by SPRITE16=1 (sprinter.mk); absent and zero-cost otherwise.
+; -------------------------------------------------------------------------
+_draw_sprite16::
+        push    ix
+        ld      ix, #4
+        add     ix, sp                  ; IX -> args: x(0,1) y(2) spr(3,4) flags(5)
+
+        ld      l, 0 (ix)               ; x_px (per-pixel byte offset)
+        ld      h, 1 (ix)
+        push    hl                      ; clip: skip if x_px + 16 > 320 (x_px >= 305)
+        ld      de, #305
+        or      a
+        sbc     hl, de
+        pop     hl                      ; HL = x_px, CF set if on-screen
+        jr      nc, ds16_done
+
+        ld      a, 2 (ix)               ; py = y + VRAM_Y_OFFSET
+        add     a, #VRAM_Y_OFFSET
+        cp      #241                    ; skip if py + 16 > 256
+        jr      nc, ds16_done
+        ld      c, a                    ; C = py (PORT_Y for blit)
+
+        di                              ; accelerator requires interrupts off
+        in      a, (#0xA2)
+        ld      (_spr_win1), a          ; save WIN1 (C code) / WIN3 (C heap)
+        in      a, (#0xE2)
+        ld      (_spr_win3), a
+
+        ; dest column = hidden buffer base + x_px
+        push    hl                      ; save x_px
+        in      a, (#0xC9)              ; RGMOD bit0 = visible buffer
+        and     #1
+        xor     #1                      ; hidden = visible ^ 1
+        ld      hl, #VRAM_BUF0_BASE
+        jr      z, ds16_base_ok
+        ld      hl, #VRAM_BUF1_BASE
+ds16_base_ok:
+        pop     de                      ; DE = x_px
+        add     hl, de
+        push    hl                      ; dest -> blit wants it in DE
+
+        ld      a, 5 (ix)               ; flags bit0: 0 transparent, 1 opaque
+        rrca
+        ld      a, #VRAM_PAGE_SPR       ; #5C transparent + VRAM-only
+        jr      nc, ds16_pg_ok
+        ld      a, #0x54                ; #54 opaque + VRAM-only
+ds16_pg_ok:
+        out     (#0xE2), a              ; WIN3 = sprite page
+
+        ld      a, 3 (ix)               ; WIN1 = page_table[gfx_pages + (spr>>6)]
+        rlca
+        rlca
+        and     #0x03
+        ld      e, a
+        ld      a, (EVP_GFX_PAGES)
+        add     a, e
+        ld      e, a
+        ld      d, #0
+        ld      hl, #EVO_PAGE_TABLE
+        add     hl, de
+        ld      a, (hl)
+        out     (#0xA2), a
+
+        ld      a, 3 (ix)               ; source = #4000 + (spr & 63) * 256
+        and     #0x3F
+        add     a, #0x40
+        ld      h, a
+        ld      l, #0
+
+        pop     de                      ; DE = dest
+        ld      a, c                    ; A = py (PORT_Y)
+        call    blit_one_16x16
+
+        ld      a, (_spr_win3)          ; restore windows + PORT_Y
+        out     (#0xE2), a
+        ld      a, (_spr_win1)
+        out     (#0xA2), a
+        ld      a, #0xC0
+        out     (#0x89), a
+        ei
+ds16_done:
+        pop     ix
+        ret
+        .endif
 
 ; -------------------------------------------------------------------------
 ; sprites_start()

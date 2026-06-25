@@ -48,6 +48,13 @@ PAL256_STAMP ?= $(BUILD)/pal256.stamp
 # See plan.md §9.2 / CLAUDE.md §2 (deliberate coordinate deviation in native mode).
 NATIVE ?= 0
 NATIVE_STAMP ?= $(BUILD)/native.stamp
+# SPRITE16=1 adds the opt-in immediate-mode 16x16 accel blit draw_sprite16()
+# (masked, by pixel coords, no queue slot / no 64-sprite limit -- see HW_NOTES §13).
+# Default 0: the code is not assembled, so existing builds are byte-identical and
+# pay zero bytes. Prepended as `SPRITE16 = N` to each SDK .asm (`.if SPRITE16`) and
+# passed to the C preprocessor (`-DSPRITE16`) to gate the evo.h declaration.
+SPRITE16 ?= 0
+SPRITE16_STAMP ?= $(BUILD)/sprite16.stamp
 SEGA_EX ?= 0
 SEGA_EX_STAMP ?= $(BUILD)/sega_ex.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
@@ -74,8 +81,8 @@ SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
 SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
-CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
-CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
+CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
+CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
 PROJECT_TEXT_SRCS := $(shell find $(PROJECT) -path $(BUILD) -prune -o -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 # crt0 должен идти первым в линковке (=> _entry на code-loc).
@@ -140,6 +147,11 @@ $(NATIVE_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'NATIVE=$(NATIVE)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+$(SPRITE16_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'SPRITE16=$(SPRITE16)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 $(SEGA_EX_STAMP): FORCE | $(BUILD)
 	@tmp="$@.tmp"; \
 	printf '%s\n' 'SEGA_EX=$(SEGA_EX)' > "$$tmp"; \
@@ -187,8 +199,8 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
 # Prepend `UNROLL = N` and `NATIVE = N` so the libs can select compile-time variants
 # via `.if UNROLL` / `.if NATIVE` (as-z80 has no -D). Changing either re-touches its stamp.
-$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) | $(BUILD)
-	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' > $(BUILD)/$*.gen.asm
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) | $(BUILD)
+	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' > $(BUILD)/$*.gen.asm
 	@cat $< >> $(BUILD)/$*.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o
