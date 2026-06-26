@@ -37,11 +37,12 @@
         .globl  _file_write
         .globl  _mem_alloc
         .globl  _mem_pages
+        .globl  _mem_free
+        .globl  _file_seek
         .globl  _page_peek
         .globl  _page_poke
         .globl  _page_read
         .globl  _page_write
-        .globl  _dss_install_tramp      ; called by runtime_init
 
         .area   _SDK
 
@@ -60,15 +61,15 @@ DSS_OPEN    = 0x11
 DSS_CLOSE   = 0x12
 DSS_READ    = 0x13
 DSS_WRITE   = 0x14
+DSS_MOVE_FP = 0x15                      ; seek: A=handle, IX:HL=offset, B=origin
 DSS_GETMEM  = 0x3D
 DSS_FREEMEM = 0x3E
 BIOS_GETMEMBLKPAGES = 0xC5
 
-; ---- trampoline page WIN2 layout (#8000-#BFFF). The body is copied here by
-;      _dss_install_tramp; the request/result scratch is read/written by both the
-;      SRAM wrappers (while WIN2=tramp page) and the body. ----
-TRAMP_ORG   = 0x8000                    ; body entry (in WIN2)
-TRAMP_STACK = 0xBCFE                    ; DRAM stack top (below the scratch)
+; ---- trampoline page WIN2 layout (#8000-#BFFF). The body itself lives in the
+;      loader image (loader.asm dss_tramp_body), in this same page; the request/
+;      result scratch below is read/written by both the SRAM wrappers (while
+;      WIN2=tramp page) and the body. (TRAMP stack: loader.asm TRAMP_STK #BCFE.) ----
 TS_FN       = 0xBD00                    ; request: function code (C)
 TS_A        = 0xBD01                    ; request: A
 TS_B        = 0xBD02                    ; request: B
@@ -83,121 +84,38 @@ TS_RDE      = 0xBD0D                    ; result: DE (u16)    5 bytes to g_res)
 TS_RCF      = 0xBD0F                    ; result: CF (0/1)
 TS_SP       = 0xBD10                    ; saved SRAM SP
 TS_W1       = 0xBD12                    ; saved WIN1 page
+TS_RETURN   = 0xBD14                    ; SRAM resume address (dss_gate -> body)
 TS_NAME     = 0xBD20                    ; bounced ASCIIZ filename / page-list buffer
-NAME_MAX    = 96                        ; filename path <=95+NUL; page list <=96 pages
+NAME_MAX    = 48                        ; filename path <=47+NUL; page list <=48 pages
 
 ; SRAM handoff: physical page of the trampoline DRAM block, written by the loader
 ; at a FIXED SRAM address (the loader is linked standalone and cannot see lib_dss
 ; symbols, so the handoff goes through this absolute slot -- like the EVO_SAVED_*
 ; exit slots at #1AC8..#1ACD). 0 = no page -> file I/O inert.
 _dss_tramp_page = 0x1ACE
-
-; =========================================================================
-;  _dss_install_tramp(): copy the straight-line trampoline body into the loader-
-;  provided DRAM page (mapped transiently into WIN1) so it lives at WIN2:#8000.
-;  Called once from runtime_init AFTER the page table / handoff is in place.
-; =========================================================================
-_dss_install_tramp::
-        ld      a, (_dss_tramp_page)
-        or      a
-        ret     z                       ; no page handed off -> file I/O unavailable
-        di
-        in      a, (#SLOT1)
-        ld      (_dss_saved_win1), a
-        ld      a, (_dss_tramp_page)
-        out     (#SLOT1), a             ; WIN1 = trampoline DRAM page
-        ld      hl, #tramp_body
-        ld      de, #0x4000             ; WIN1 view of the page, offset 0 == #8000 view
-        ld      bc, #tramp_body_end - tramp_body
-        ldir
-        ld      a, (_dss_saved_win1)
-        out     (#SLOT1), a
-        ei
-        ret
+; WIN2 entry offset of the trampoline body inside that page. The body lives in the
+; LOADER image (loader.asm dss_tramp_body), NOT in _SDK -- the loader writes its
+; address here. dss_gate reads it and jumps in; the body returns via TS_RETURN.
+_dss_tramp_off  = 0x1ACF
 
 ; =========================================================================
 ;  dss_gate: drive ONE DSS/BIOS call through the trampoline. Request fields are
-;  already written into the tramp-page scratch (TS_*). Returns nothing; result is
-;  in TS_RA/TS_RDE/TS_RCF (read by the caller after restore). Runs from SRAM,
-;  maps the tramp page into WIN2, jumps into the body, and is resumed at
-;  dss_gate_return after the body restores SRAM/CACHE.
-;  In: nothing (scratch pre-filled, WIN2 already = tramp page). DI on entry.
-; =========================================================================
-; The body is straight-line + only relative (jr) internal branches, so it is
-; position-independent at #8000. Internal absolute jp/call are forbidden EXCEPT the
-; final jp to the SRAM resume stub (valid once CACHE is back on).
-tramp_body:
-        ld      (TS_SP), sp             ; save SRAM SP (WIN0=SRAM still mapped here)
-        ld      sp, #TRAMP_STACK        ; SP -> WIN2 DRAM stack
-        in      a, (#SLOT1)
-        ld      (TS_W1), a              ; save caller WIN1
-        ld      a, (TS_WIN1)
-        or      a
-        jr      z, 1$
-        out     (#SLOT1), a             ; WIN1 = buffer page for the DSS read/write
-1$:
-        ; --- enter DSS context: CACHE off, IM 1, EI (disk polling) ---
-        di
-        in      a, (#CACHE_OFF)         ; WIN0 = DSS BIOS (SRAM gone)
-        im      1
-        ; load DSS argument registers from the scratch
-        ld      ix, (TS_IX)
-        ld      hl, (TS_HL)
-        ld      de, (TS_DE)
-        ld      a, (TS_B)
-        ld      b, a
-        ld      a, (TS_FN)
-        ld      c, a
-        ld      iy, #0                  ; harmless default
-        ; Decide RST #10 (DSS) vs RST #08 (BIOS) BEFORE loading A: 'or a' sets Z,
-        ; and the following 'ld a' does NOT touch flags, so Z survives to the jr.
-        ld      a, (TS_RST)
-        or      a
-        ld      a, (TS_A)               ; A = primary arg (flags from 'or a' preserved)
-        jr      nz, 2$
-        ei
-        rst     #0x10                   ; DSS call
-        jr      3$
-2$:
-        ei
-        rst     #0x08                   ; BIOS call
-3$:
-        di
-        ; capture result (CF, A, B, DE) into the scratch. B carries the count for
-        ; BIOS EMM_LIST (#C5); A/DE carry handles / byte counts for DSS calls.
-        push    af                      ; F has CF
-        ld      (TS_RDE), de
-        ld      a, b
-        ld      (TS_RB), a
-        pop     af
-        ld      (TS_RA), a
-        ld      a, #0
-        jr      nc, 4$
-        ld      a, #1
-4$:
-        ld      (TS_RCF), a
-        ; --- leave DSS context: CACHE on (WIN0=SRAM), IM 2 ---
-        ld      a, (TS_W1)
-        out     (#SLOT1), a             ; restore caller WIN1
-        xor     a
-        out     (#CACHE_PAGE), a        ; ROM_RG = 0 (loader CACHE-on order)
-        in      a, (#CACHE_ON)          ; WIN0 = SRAM back
-        im      2
-        ld      sp, (TS_SP)             ; SP -> SRAM stack (WIN0 SRAM is back)
-        jp      dss_gate_return         ; absolute SRAM addr -- valid now
-tramp_body_end:
-
-; =========================================================================
-;  SRAM-side gate entry. Pre: DI, scratch (TS_*) filled, but WIN2 still = caller
-;  chunk2. Saves chunk2, maps the tramp page into WIN2, jumps into the body.
-;  Resumes at dss_gate_return (body jumps back here after CACHE on).
+;  already written into the tramp-page scratch (TS_*). The trampoline BODY itself
+;  lives in the loader page (loader.asm dss_tramp_body), NOT here -- we just map
+;  the page into WIN2, hand the body the SRAM resume address (TS_RETURN), and jump
+;  to it (entry offset from the loader-filled _dss_tramp_off). The body returns to
+;  dss_gate_return (via `jp (hl)` on TS_RETURN) after restoring SRAM/CACHE.
+;  In: nothing (scratch pre-filled, WIN2 = caller chunk2). DI on entry.
 ; =========================================================================
 dss_gate:
         in      a, (#SLOT2)
         ld      (_dss_saved_win2), a    ; save program chunk2
         ld      a, (_dss_tramp_page)
         out     (#SLOT2), a             ; WIN2 = trampoline page
-        jp      TRAMP_ORG               ; enter body (in WIN2 #8000)
+        ld      hl, #dss_gate_return    ; tell the body where to resume (SRAM addr)
+        ld      (TS_RETURN), hl
+        ld      hl, (_dss_tramp_off)    ; body entry in WIN2 (loader-filled)
+        jp      (hl)
 dss_gate_return:
         ; WIN0=SRAM, WIN2 still = tramp page; result is in the scratch.
         ld      a, (_dss_saved_win2)
@@ -437,6 +355,53 @@ _mem_pages::
         ld      h, #0
         ret
 
+; void mem_free(u8 block)
+_mem_free::
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)
+        ld      (gr_a), a
+        ld      a, #DSS_FREEMEM
+        ld      (gr_fn), a
+        call    clear_buf_req
+        call    gate_call
+        ret
+
+; i16 file_seek(u8 h, u32 off, u8 origin)  -- DSS Move_FP: A=handle, IX:HL=offset,
+;   B=origin (0=start, 1=current, 2=end). Returns 0 on success, -1 on error.
+_file_seek::
+        ld      hl, #2
+        add     hl, sp
+        ld      a, (hl)                 ; h            (SP+2)
+        ld      (gr_a), a
+        inc     hl
+        ld      e, (hl)                 ; off byte0    (SP+3)
+        inc     hl
+        ld      d, (hl)                 ; off byte1    (SP+4)
+        ld      (gr_hl), de             ; HL arg = offset low word
+        inc     hl
+        ld      e, (hl)                 ; off byte2    (SP+5)
+        inc     hl
+        ld      d, (hl)                 ; off byte3    (SP+6)
+        ld      (gr_ix), de             ; IX arg = offset high word
+        inc     hl
+        ld      a, (hl)                 ; origin       (SP+7)
+        ld      (gr_b), a               ; B = origin
+        ld      a, #DSS_MOVE_FP
+        ld      (gr_fn), a
+        xor     a
+        ld      (gr_win1), a
+        ld      (gr_rst), a
+        call    gate_call
+        ld      a, (g_res_cf)
+        or      a
+        jr      nz, 1$
+        ld      hl, #0                  ; success
+        ret
+1$:
+        ld      hl, #0xFFFF             ; error
+        ret
+
 ; -------------------------------------------------------------------------
 ;  Paged-memory accessors (no DSS -- pure window paging, DI + save/restore WIN1).
 ;  The C buffer (src/dst) must NOT live in WIN1 (#4000-#7FFF). Borrow WIN1 for the
@@ -631,5 +596,5 @@ g_res_cf:.db    0
 g_res_end:
 g_res_len = g_res_end - g_res
 
-g_name: .ds     NAME_MAX                ; bounced filename (<=95+NUL) / page-list (<=96)
+g_name: .ds     NAME_MAX                ; bounced filename (<=47+NUL) / page-list (<=48)
         .endif

@@ -110,6 +110,8 @@ EVO_SAVED_MEM_CODE   = 0x1ACC       ; SRAM: DSS code-block handle (FreeMem on ex
 EVO_SAVED_MEM_ASSETS = 0x1ACD       ; SRAM: DSS asset-block handle (0 = none)
 EVO_DSS_TRAMP    = 0x1ACE           ; SRAM: phys page for the runtime DSS trampoline
                                     ;   (the loader's OWN page -- free after load).
+EVO_DSS_TRAMP_OFF = 0x1ACF          ; SRAM: WIN2-offset of the trampoline body in that
+                                    ;   page (u16; the body lives in this loader image).
 EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE
@@ -120,7 +122,37 @@ STAGE_SAVED_W3   = STAGE + EVO_SAVED_W3
 STAGE_SAVED_MEM_CODE   = STAGE + EVO_SAVED_MEM_CODE
 STAGE_SAVED_MEM_ASSETS = STAGE + EVO_SAVED_MEM_ASSETS
 STAGE_DSS_TRAMP  = STAGE + EVO_DSS_TRAMP
+STAGE_DSS_TRAMP_OFF = STAGE + EVO_DSS_TRAMP_OFF
 STAGE_META       = STAGE + EVO_META
+
+        .if FILEIO
+; --- DSS trampoline WIN2-page scratch layout (shared with lib_dss.asm; same
+;     absolute addresses). The body below runs from this loader page (mapped into
+;     WIN2 at runtime); it is position- and symbol-independent (only ports, these
+;     absolute WIN2 scratch cells, and a return address read from TS_RETURN). ---
+SLOT0_      = 0x82
+SLOT1_      = 0xA2
+SLOT2_      = 0xC2
+CACHE_PG_   = 0x8F
+CACHE_ON_   = 0xFB
+CACHE_OFF_  = 0x7B
+TRAMP_STK   = 0xBCFE
+TS_FN_      = 0xBD00
+TS_A_       = 0xBD01
+TS_B_       = 0xBD02
+TS_HL_      = 0xBD03
+TS_DE_      = 0xBD05
+TS_IX_      = 0xBD07
+TS_WIN1_    = 0xBD09
+TS_RST_     = 0xBD0A
+TS_RA_      = 0xBD0B
+TS_RB_      = 0xBD0C
+TS_RDE_     = 0xBD0D
+TS_RCF_     = 0xBD0F
+TS_SP_      = 0xBD10
+TS_W1_      = 0xBD12
+TS_RETURN_  = 0xBD14
+        .endif
 
 ; =========================================================================
 _loader_entry::
@@ -327,11 +359,16 @@ asset_done:
         ld      (STAGE_SAVED_MEM_CODE), a   ; DSS code-block handle (FreeMem on exit)
         ld      a, (l_mem_assets)
         ld      (STAGE_SAVED_MEM_ASSETS), a ; DSS asset-block handle (0 = none)
+        .if FILEIO
         ; Hand off the loader's OWN page (we run in WIN2, never remap it -> IN #C2
-        ; is its phys page) as the runtime DSS trampoline page. It is ~90% free and
-        ; already owned by the process, so no extra GetMem and no page is leaked.
+        ; is its phys page) as the runtime DSS trampoline page, plus the WIN2 offset
+        ; of the trampoline body (which lives in THIS loader image -- see dss_tramp_
+        ; body). ~90% free, already owned, so no extra GetMem and no page leaked.
         in      a, (#SLOT2)
         ld      (STAGE_DSS_TRAMP), a
+        ld      hl, #dss_tramp_body
+        ld      (STAGE_DSS_TRAMP_OFF), hl
+        .endif
         ld      a, (l_M)
         or      a
         jr      z, tables_done
@@ -745,3 +782,67 @@ hrust_80F0:
         ex      de, hl
         jr      nc, hrust_8096
         ret
+
+        .if FILEIO
+; -------------------------------------------------------------------------
+;  dss_tramp_body: the DSS-call trampoline. Lives in THIS loader page (handed off
+;  to the runtime as the trampoline page); it is NOT stored in the SDK _SDK. The
+;  runtime maps the page into WIN2 and jumps here (entry address passed via
+;  STAGE_DSS_TRAMP_OFF). Position- and symbol-independent: uses only ports, the
+;  absolute WIN2 scratch cells (TS_*_), and the SRAM return address from TS_RETURN_
+;  (set by lib_dss.asm dss_gate). Internal branches are relative (jr) only.
+; -------------------------------------------------------------------------
+dss_tramp_body:
+        ld      (TS_SP_), sp            ; save SRAM SP (WIN0=SRAM still mapped here)
+        ld      sp, #TRAMP_STK          ; SP -> WIN2 DRAM stack
+        in      a, (#SLOT1_)
+        ld      (TS_W1_), a             ; save caller WIN1
+        ld      a, (TS_WIN1_)
+        or      a
+        jr      z, 1$
+        out     (#SLOT1_), a            ; WIN1 = buffer page for DSS read/write
+1$:
+        di
+        in      a, (#CACHE_OFF_)        ; WIN0 = DSS BIOS (SRAM gone)
+        im      1
+        ld      ix, (TS_IX_)
+        ld      hl, (TS_HL_)
+        ld      de, (TS_DE_)
+        ld      a, (TS_B_)
+        ld      b, a
+        ld      a, (TS_FN_)
+        ld      c, a
+        ld      iy, #0
+        ld      a, (TS_RST_)            ; decide RST #10/#08 before loading A (Z survives)
+        or      a
+        ld      a, (TS_A_)
+        jr      nz, 2$
+        ei
+        rst     #0x10                   ; DSS
+        jr      3$
+2$:
+        ei
+        rst     #0x08                   ; BIOS
+3$:
+        di
+        push    af                      ; F has CF
+        ld      (TS_RDE_), de
+        ld      a, b
+        ld      (TS_RB_), a
+        pop     af
+        ld      (TS_RA_), a
+        ld      a, #0
+        jr      nc, 4$
+        ld      a, #1
+4$:
+        ld      (TS_RCF_), a
+        ld      a, (TS_W1_)
+        out     (#SLOT1_), a            ; restore caller WIN1
+        xor     a
+        out     (#CACHE_PG_), a
+        in      a, (#CACHE_ON_)         ; WIN0 = SRAM back
+        im      2
+        ld      sp, (TS_SP_)            ; SP -> SRAM stack (WIN0 SRAM back)
+        ld      hl, (TS_RETURN_)        ; SRAM resume addr (set by dss_gate)
+        jp      (hl)
+        .endif

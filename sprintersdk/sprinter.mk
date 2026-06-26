@@ -93,6 +93,8 @@ SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
 # SDK mutable data in SRAM, below the table region (#1A00). Placed at #1400 (the
 # gap above _SDK code, which ends ~#1140) so the larger NATIVE sprite tables
 # (16-bit X queue + saved rects, ~1200 B) still fit under #1A00. Compat unchanged.
+# FILEIO's trampoline body lives in the loader page (not _SDK), so FILEIO _SDK fits
+# under #1400 like everyone else -> #1400 for all configs, byte-identical when off.
 SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
@@ -183,8 +185,12 @@ $(SEGA_EX_STAMP): FORCE | $(BUILD)
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
-$(BUILD)/loader.rel: $(LOADER_SRC) | $(BUILD)
-	$(SDASZ80) $(SDASZ_FLAGS) $@ $<
+# Prepend `FILEIO = N` so the loader can hand off its own page + the DSS trampoline
+# body (only under FILEIO=1) -- FILEIO=0 keeps the loader byte-identical.
+$(BUILD)/loader.rel: $(LOADER_SRC) $(FILEIO_STAMP) | $(BUILD)
+	@printf 'FILEIO = %s\n' '$(FILEIO)' > $(BUILD)/loader.gen.asm
+	@cat $< >> $(BUILD)/loader.gen.asm
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/loader.gen.asm
 	cp $@ $(basename $@).o
 
 $(LOADER_BIN): $(BUILD)/loader.rel

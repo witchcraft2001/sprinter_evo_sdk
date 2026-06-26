@@ -121,9 +121,6 @@ _evo_runtime_init::
         ; so joystick() stays a plain IN A,(#1F) with no per-frame re-select.
         ; WR5 bit7=DTR per Z84C15 datasheet; #E0 also sets Tx 8bit/char (D6,D5).
         call    im2_sound_setup        ; CTC 50Hz IM2 -> _sound_tick + _time; EI
-        .if FILEIO
-        call    _dss_install_tramp     ; copy the DSS trampoline into its DRAM page
-        .endif
         ret
 
 ; -------------------------------------------------------------------------

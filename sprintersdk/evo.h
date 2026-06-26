@@ -366,9 +366,11 @@ i16 file_create(const char* name);          //-> handle / -1
 void file_close(u8 h);
 i16 file_read(u8 h, u8 page, u16 off, u16 len);   //page:off <- файл; ->прочитано / -1
 i16 file_write(u8 h, u8 page, u16 off, u16 len);  //page:off -> файл; ->записано / -1
+i16 file_seek(u8 h, u32 off, u8 origin);    //origin 0=начало 1=текущ 2=конец; 0 / -1
 
 u8 mem_alloc(u8 pages);                     //DSS.GetMem -> block id (0xFF=ошибка)
-u8 mem_pages(u8 block, u8* dst);            //физ.страницы блока в dst; ->кол-во
+u8 mem_pages(u8 block, u8* dst);            //физ.страницы блока в dst; ->кол-во (<=32)
+void mem_free(u8 block);                    //освободить блок
 
 
 //Акцессоры к страничной памяти (без DSS, чистый paging; C-буфер НЕ в WIN1 #4000..#7FFF):
