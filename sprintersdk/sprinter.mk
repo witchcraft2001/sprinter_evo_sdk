@@ -64,6 +64,12 @@ SPRITE16_STAMP ?= $(BUILD)/sprite16.stamp
 # to the C preprocessor (`-DSAMPLE_ASYNC`) to gate the evo.h declaration.
 SAMPLE_ASYNC ?= 0
 SAMPLE_ASYNC_STAMP ?= $(BUILD)/sample_async.stamp
+# FILEIO=1 adds blocking DSS file I/O into paged memory (file_open/read/write/...,
+# mem_alloc, page accessors). Calls run with CACHE off (WIN0=DSS BIOS) via a WIN2
+# trampoline, IM1+EI for disk polling, interrupts/music frozen for the call. Needs
+# the loader to hand off a trampoline page. Default 0 -> not assembled, byte-identical.
+FILEIO ?= 0
+FILEIO_STAMP ?= $(BUILD)/fileio.stamp
 SEGA_EX ?= 0
 SEGA_EX_STAMP ?= $(BUILD)/sega_ex.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
@@ -90,8 +96,8 @@ SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
 SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
 CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
 
-CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
-CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
+CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -DFILEIO=$(FILEIO) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
+CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -DFILEIO=$(FILEIO) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
 PROJECT_TEXT_SRCS := $(shell find $(PROJECT) -path $(BUILD) -prune -o -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 # crt0 должен идти первым в линковке (=> _entry на code-loc).
@@ -100,7 +106,7 @@ PROJECT_TEXT_SRCS := $(shell find $(PROJECT) -path $(BUILD) -prune -o -type f \(
 SDCC290_RTL := compat div divsigned divulong mod modulong mul mullong shift rle
 RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
 # SDK libraries by EvoSDK responsibility zone (mirror of evosdk/ file names).
-SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound
+SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound lib_dss
 LIB_RELS := $(patsubst %,$(BUILD)/%.rel,$(SDK_LIB))
 OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/evo.rel $(BUILD)/main.rel $(RTL_RELS)
 
@@ -166,6 +172,11 @@ $(SAMPLE_ASYNC_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'SAMPLE_ASYNC=$(SAMPLE_ASYNC)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+$(FILEIO_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'FILEIO=$(FILEIO)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 $(SEGA_EX_STAMP): FORCE | $(BUILD)
 	@tmp="$@.tmp"; \
 	printf '%s\n' 'SEGA_EX=$(SEGA_EX)' > "$$tmp"; \
@@ -213,8 +224,8 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
 # Prepend `UNROLL = N` and `NATIVE = N` so the libs can select compile-time variants
 # via `.if UNROLL` / `.if NATIVE` (as-z80 has no -D). Changing either re-touches its stamp.
-$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) | $(BUILD)
-	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' > $(BUILD)/$*.gen.asm
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) $(FILEIO_STAMP) | $(BUILD)
+	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\nFILEIO = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' '$(FILEIO)' > $(BUILD)/$*.gen.asm
 	@cat $< >> $(BUILD)/$*.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o

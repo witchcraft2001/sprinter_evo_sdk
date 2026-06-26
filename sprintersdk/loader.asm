@@ -108,6 +108,8 @@ EVO_SAVED_W1     = 0x1ACA           ; SRAM: original DSS WIN1 phys page (for exi
 EVO_SAVED_W3     = 0x1ACB           ; SRAM: original DSS WIN3 phys page (for exit)
 EVO_SAVED_MEM_CODE   = 0x1ACC       ; SRAM: DSS code-block handle (FreeMem on exit)
 EVO_SAVED_MEM_ASSETS = 0x1ACD       ; SRAM: DSS asset-block handle (0 = none)
+EVO_DSS_TRAMP    = 0x1ACE           ; SRAM: phys page for the runtime DSS trampoline
+                                    ;   (the loader's OWN page -- free after load).
 EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE
@@ -117,6 +119,7 @@ STAGE_SAVED_W1   = STAGE + EVO_SAVED_W1
 STAGE_SAVED_W3   = STAGE + EVO_SAVED_W3
 STAGE_SAVED_MEM_CODE   = STAGE + EVO_SAVED_MEM_CODE
 STAGE_SAVED_MEM_ASSETS = STAGE + EVO_SAVED_MEM_ASSETS
+STAGE_DSS_TRAMP  = STAGE + EVO_DSS_TRAMP
 STAGE_META       = STAGE + EVO_META
 
 ; =========================================================================
@@ -324,6 +327,11 @@ asset_done:
         ld      (STAGE_SAVED_MEM_CODE), a   ; DSS code-block handle (FreeMem on exit)
         ld      a, (l_mem_assets)
         ld      (STAGE_SAVED_MEM_ASSETS), a ; DSS asset-block handle (0 = none)
+        ; Hand off the loader's OWN page (we run in WIN2, never remap it -> IN #C2
+        ; is its phys page) as the runtime DSS trampoline page. It is ~90% free and
+        ; already owned by the process, so no extra GetMem and no page is leaked.
+        in      a, (#SLOT2)
+        ld      (STAGE_DSS_TRAMP), a
         ld      a, (l_M)
         or      a
         jr      z, tables_done

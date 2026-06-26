@@ -350,3 +350,30 @@ void delay(u16 time) _naked;
 
 void quit_to_dss(void) _naked;
 #endif
+
+#if FILEIO
+//Sprinter-only, ВКЛЮЧАЕТСЯ флагом сборки FILEIO=1 (по умолчанию выключено — код не
+//ассемблируется, сборки байт-в-байт). БЛОКИРУЮЩИЙ файловый ввод-вывод через DSS:
+//на время вызова CACHE off (WIN0=DSS BIOS), прерывания/музыка/звук/кадр СТОЯТ
+//(вызов идёт под IM1+EI для опроса диска, затем возврат в IM2). Требует, чтобы
+//загрузчик передал трамплин-страницу (иначе функции возвращают ошибку).
+//
+//Данные читаются/пишутся в СТРАНИЧНУЮ память: page = физический номер страницы
+//(из mem_pages), off 0..16383, длина <=16384 (одно окно). Имя файла — ASCIIZ.
+
+i16 file_open(const char* name, u8 mode);   //mode 0=rw 1=read 2=write; ->handle / -1
+i16 file_create(const char* name);          //-> handle / -1
+void file_close(u8 h);
+i16 file_read(u8 h, u8 page, u16 off, u16 len);   //page:off <- файл; ->прочитано / -1
+i16 file_write(u8 h, u8 page, u16 off, u16 len);  //page:off -> файл; ->записано / -1
+
+u8 mem_alloc(u8 pages);                     //DSS.GetMem -> block id (0xFF=ошибка)
+u8 mem_pages(u8 block, u8* dst);            //физ.страницы блока в dst; ->кол-во
+
+
+//Акцессоры к страничной памяти (без DSS, чистый paging; C-буфер НЕ в WIN1 #4000..#7FFF):
+u8 page_peek(u8 page, u16 off);
+void page_poke(u8 page, u16 off, u8 val);
+void page_read(u8 page, u16 off, void* dst, u16 len);          //страница -> C-буфер
+void page_write(u8 page, u16 off, const void* src, u16 len);   //C-буфер -> страница
+#endif
