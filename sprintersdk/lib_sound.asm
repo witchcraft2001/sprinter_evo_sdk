@@ -26,9 +26,8 @@
 
         .area   _SDK
 
-EVO_PAGE_TABLE  = 0x1A00                ; loader-filled phys page table
-EVO_META_IMGCNT = 0x1B10                ; EVO_META + 16
-EVO_IMG_TABLE   = 0x1B11                ; img records: u16 base, u8 wt, u8 ht, u8 flags
+; EVO_PAGE_TABLE / EVO_META_IMGCNT / EVO_IMG_TABLE come from evo_map.inc (prelude).
+; EVO_IMG_TABLE records: u16 base, u8 wt, u8 ht, u8 flags.
 
 SLOT3       = 0xE2
 CBL_CTRL    = 0x004E

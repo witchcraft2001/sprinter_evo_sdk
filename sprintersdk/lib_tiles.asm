@@ -30,11 +30,9 @@
         ; --- imported from lib_sprites.asm ---
         .globl  _sprites_active         ; tile-sync runs only while sprites active
 
-; --- loader-filled runtime tables in the SDK SRAM region. MUST match loader.asm
-;     and lib_startup.asm. ---
-EVO_PAGE_TABLE = 0x1A00                 ; phys page numbers, index = logical page
-EVO_IMG_TABLE  = 0x1B11                 ; EVO_META(#1B00)+16 hdr +1 img_count byte
-                                        ; records: { u16 base_tile, u8 wt, u8 ht, u8 flags }
+; --- loader-filled runtime tables in the SDK SRAM region. EVO_PAGE_TABLE /
+;     EVO_IMG_TABLE come from evo_map.inc (prelude, derived from EVO_TABLES).
+;     EVO_IMG_TABLE records: { u16 base_tile, u8 wt, u8 ht, u8 flags }. ---
 VRAM_PAGE      = 0x50                    ; VRAM + DRAM mirror (read = mirror)
 VRAM_BUF0_BASE = 0xC000
 VRAM_BUF1_BASE = 0xC140

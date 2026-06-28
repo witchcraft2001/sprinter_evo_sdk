@@ -12,7 +12,12 @@
 #   link: sdldz80 -n -f <.lk> (генерируем линкер-скрипт)
 # Рецепт сверен с рабочим build evosdk_libs (тот же SDCC 2.9.0).
 
-SDK_DIR ?= $(dir $(lastword $(MAKEFILE_LIST)))
+# Capture immediately (:=) at parse time: later `include $(BUILD)/layout.mk` (the
+# LAYOUT_PASS=2 raise) appends to MAKEFILE_LIST, so a lazy `?=` here would later
+# resolve $(lastword ...) to layout.mk's dir (_build/) and break $(SDK_DIR)*.s rules.
+ifndef SDK_DIR
+SDK_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+endif
 include $(SDK_DIR)toolchain.mk
 
 PROJECT  ?= .
@@ -90,13 +95,24 @@ PACK_STAMP ?= $(BUILD)/pack.stamp
 # SDK code at #0100 (not #0000: sdld ignores -b base 0; #0000-#00FF is left for
 # the RST/IM2 vectors, used in Phase 2). Still well inside the SRAM region.
 SDK_LOC     ?= 0x0100           # SDK hot code (_SDK), in SRAM/WIN0
-# SDK mutable data in SRAM, below the table region (#1A00). Placed at #1400 (the
-# gap above _SDK code, which ends ~#1140) so the larger NATIVE sprite tables
-# (16-bit X queue + saved rects, ~1200 B) still fit under #1A00. Compat unchanged.
-# FILEIO's trampoline body lives in the loader page (not _SDK), so FILEIO _SDK fits
-# under #1400 like everyone else -> #1400 for all configs, byte-identical when off.
-SDKDATA_LOC ?= 0x1400           # SDK mutable data (_SDKDATA), in SRAM
-CODE_LOC    ?= 0x2400           # C code (crt0 first); C _DATA/_BSS follow contiguously
+# Auto-raising SRAM map. The downstream regions float above _SDK, never below
+# these FLOORS (so every build that already fits keeps byte-identical addresses):
+#   _SDKDATA  floor #1400   (SDK mutable data, after _SDK)
+#   EVO_TABLES floor #1A00  (page table + saved slots + meta; size #600)
+#   stack      #2000-#23FF  (1 KB, after the tables)
+#   _CODE      #2400        (C image chunk0; rest of C spills to DRAM chunks)
+# When build flags grow _SDK past a floor, layout.py (fed the pass-1 link map)
+# computes the smallest raised layout and writes $(BUILD)/layout.mk; the EXE recipe
+# re-runs the build with LAYOUT_PASS=2 to pick it up. See HW_NOTES / tools/layout.py.
+LAYOUT      ?= $(SDK_DIR)tools/layout.py
+EVO_TABLES  := 0x1A00           # page-table base (floor); evo_map.inc derives the rest
+SDKDATA_LOC := 0x1400           # SDK mutable data (_SDKDATA), in SRAM (floor)
+STACK_LOC   := 0x2000           # game stack base (floor)
+STACK_TOP   := 0x23ff           # game stack top  (floor)  -> crt0 `ld sp,#STACK_TOP`
+CODE_LOC    := 0x2400           # C code base (floor); crt0 first => _entry on CODE_LOC
+ifeq ($(LAYOUT_PASS),2)
+include $(BUILD)/layout.mk      # raised EVO_TABLES/SDKDATA_LOC/STACK_*/CODE_LOC
+endif
 
 CPPFLAGS := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -DFILEIO=$(FILEIO) -I$(SDK_DIR) -I$(PROJECT) -I$(BUILD)
 CPPFLAGS_CP866 := $(SDCPPFLAGS) -DNATIVE=$(NATIVE) -DSEGA_EX=$(SEGA_EX) -DSPRITE16=$(SPRITE16) -DSAMPLE_ASYNC=$(SAMPLE_ASYNC) -DFILEIO=$(FILEIO) -I$(SDK_DIR) -I$(CP866_SRC_DIR) -I$(BUILD) -I$(PROJECT)
@@ -111,6 +127,12 @@ RTL_RELS := $(patsubst %,$(BUILD)/sdcc290_%.rel,$(SDCC290_RTL))
 SDK_LIB := lib_startup lib_tiles lib_sprites lib_input lib_sound lib_dss
 LIB_RELS := $(patsubst %,$(BUILD)/%.rel,$(SDK_LIB))
 OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/evo.rel $(BUILD)/main.rel $(RTL_RELS)
+# Objects that embed the (raisable) map addresses -- crt0 (STACK_TOP), the SDK libs
+# (EVO_* table symbols) and the loader (EVO_* / STAGE_*). On a LAYOUT_PASS=2 raise
+# these are removed so the second pass rebuilds them unconditionally (the in-process
+# regen would otherwise be flaky against second-granularity mtimes). evo/main/RTL
+# objects carry no absolute map address (relocated at link), so they are kept.
+LAYOUT_OBJS := $(BUILD)/crt0.rel $(LIB_RELS) $(BUILD)/loader.rel
 
 .PHONY: all clean resources assets exe sprinter FORCE
 all: $(BUILD)/$(OUT).ihx $(ASSETS_DAT)
@@ -184,11 +206,43 @@ $(SEGA_EX_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'SEGA_EX=$(SEGA_EX)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+# Shared memory-map header: derives every loader/SDK table symbol from EVO_TABLES,
+# so the whole map moves as one when the layout raises. Prepended to each SDK .asm
+# and the loader. Regenerated only when EVO_TABLES changes (cmp) -> triggers the
+# minimal re-assembly on the LAYOUT_PASS=2 raise.
+EVO_MAP_INC := $(BUILD)/evo_map.inc
+$(EVO_MAP_INC): FORCE | $(BUILD)
+	@tmp="$@.tmp"; { \
+	  printf 'EVO_TABLES = %s\n' '$(EVO_TABLES)'; \
+	  printf 'EVO_PAGE_TABLE = EVO_TABLES\n'; \
+	  printf 'EVO_SAVED_VMODE = EVO_TABLES + 0xC8\n'; \
+	  printf 'EVO_SAVED_W0 = EVO_TABLES + 0xC9\n'; \
+	  printf 'EVO_SAVED_W1 = EVO_TABLES + 0xCA\n'; \
+	  printf 'EVO_SAVED_W3 = EVO_TABLES + 0xCB\n'; \
+	  printf 'EVO_SAVED_MEM_CODE = EVO_TABLES + 0xCC\n'; \
+	  printf 'EVO_SAVED_MEM_ASSETS = EVO_TABLES + 0xCD\n'; \
+	  printf 'EVO_DSS_TRAMP = EVO_TABLES + 0xCE\n'; \
+	  printf 'EVO_DSS_TRAMP_OFF = EVO_TABLES + 0xCF\n'; \
+	  printf 'EVO_META = EVO_TABLES + 0x100\n'; \
+	  printf 'EVP_GFX_PAGES = EVO_TABLES + 0x105\n'; \
+	  printf 'EVO_META_IMGCNT = EVO_TABLES + 0x110\n'; \
+	  printf 'EVO_IMG_TABLE = EVO_TABLES + 0x111\n'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
+STACK_STAMP := $(BUILD)/stack.stamp
+$(STACK_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'STACK_TOP=$(STACK_TOP)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 # --- PRELOAD loader binary (assembled standalone, linked at LOADER_ORG) ---
-# Prepend `FILEIO = N` so the loader can hand off its own page + the DSS trampoline
-# body (only under FILEIO=1) -- FILEIO=0 keeps the loader byte-identical.
-$(BUILD)/loader.rel: $(LOADER_SRC) $(FILEIO_STAMP) | $(BUILD)
-	@printf 'FILEIO = %s\n' '$(FILEIO)' > $(BUILD)/loader.gen.asm
+# Prepend the shared map header (EVO_* table addresses, so the loader writes the
+# tables at the same -- possibly raised -- addresses the SDK reads them) and
+# `FILEIO = N` (loader hands off its page + trampoline body only under FILEIO=1).
+$(BUILD)/loader.rel: $(LOADER_SRC) $(FILEIO_STAMP) $(EVO_MAP_INC) | $(BUILD)
+	@cat $(EVO_MAP_INC) > $(BUILD)/loader.gen.asm
+	@printf 'FILEIO = %s\n' '$(FILEIO)' >> $(BUILD)/loader.gen.asm
 	@cat $< >> $(BUILD)/loader.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/loader.gen.asm
 	cp $@ $(basename $@).o
@@ -201,10 +255,24 @@ $(LOADER_BIN): $(BUILD)/loader.rel
 # Monoblock DSS PRELOAD EXE: header + loader + paged code/assets inside.
 # DSS loads only the loader (#4100/WIN1); it stages code into pages, copies the
 # hot chunk into SRAM (CACHE), and jumps to crt0 _entry (#2400). See HW_NOTES §9.2.
-$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP) $(MANIFEST)
+$(EXE): $(BUILD)/$(OUT).ihx $(ASSETS_DAT) $(DSS_EXE) $(LOADER_BIN) $(PACK_STAMP) $(MANIFEST) $(LAYOUT)
+ifeq ($(LAYOUT_PASS),2)
 	$(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
-	    --load 0 --entry $(CODE_LOC) --stack 0x23ff --assets $(ASSETS_DAT) \
+	    --load 0 --entry $(CODE_LOC) --stack $(STACK_TOP) --tables $(EVO_TABLES) --assets $(ASSETS_DAT) \
 	    --manifest $(MANIFEST) --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS)
+else
+	@$(PYTHON) $(LAYOUT) --map $(BUILD)/$(OUT).map --out $(BUILD)/layout.mk
+	@if test -s $(BUILD)/layout.mk; then \
+	    echo ">> SDK overflows the floor SRAM map -- raising layout (LAYOUT_PASS=2)"; \
+	    rm -f $(LAYOUT_OBJS) $(LAYOUT_OBJS:.rel=.o) $(BUILD)/loader.bin \
+	          $(BUILD)/$(OUT).ihx $(BUILD)/$(OUT).map; \
+	    $(MAKE) LAYOUT_PASS=2 $@; \
+	else \
+	    $(PYTHON) $(DSS_EXE) --monoblock --loader $(LOADER_BIN) $< $@ \
+	        --load 0 --entry $(CODE_LOC) --stack $(STACK_TOP) --tables $(EVO_TABLES) --assets $(ASSETS_DAT) \
+	        --manifest $(MANIFEST) --map $(BUILD)/$(OUT).map $(DSS_PACK_ARGS); \
+	fi
+endif
 
 $(PROJECT_EXE): $(EXE)
 	cp $< $@
@@ -220,7 +288,16 @@ $(BUILD)/$(OUT).ihx: $(OBJS)
 	@printf '%s\n' '-e'                   >> $(BUILD)/$(OUT).lk
 	$(SDLDZ80) -n -f $(BUILD)/$(OUT).lk
 
-# --- asm (.s) -> .rel : crt0 + sdcc290_* runtime ---
+# crt0 carries the game stack pointer (`ld sp,#STACK_TOP`), which the layout raises
+# together with the table region -- prepend STACK_TOP (floor #23ff). Explicit rule
+# overrides the generic .s rule below.
+$(BUILD)/crt0.rel: $(SDK_DIR)crt0.s $(STACK_STAMP) | $(BUILD)
+	@printf 'STACK_TOP = %s\n' '$(STACK_TOP)' > $(BUILD)/crt0.gen.s
+	@cat $< >> $(BUILD)/crt0.gen.s
+	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/crt0.gen.s
+	cp $@ $(basename $@).o
+
+# --- asm (.s) -> .rel : sdcc290_* runtime ---
 # Этот sdld ищет объект как <base>.o (заменяет .rel->.o), поэтому делаем .o-копию
 # (приём из evosdk_libs).
 $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
@@ -230,8 +307,9 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
 # Prepend `UNROLL = N` and `NATIVE = N` so the libs can select compile-time variants
 # via `.if UNROLL` / `.if NATIVE` (as-z80 has no -D). Changing either re-touches its stamp.
-$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) $(FILEIO_STAMP) | $(BUILD)
-	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\nFILEIO = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' '$(FILEIO)' > $(BUILD)/$*.gen.asm
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) $(FILEIO_STAMP) $(EVO_MAP_INC) | $(BUILD)
+	@cat $(EVO_MAP_INC) > $(BUILD)/$*.gen.asm
+	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\nFILEIO = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' '$(FILEIO)' >> $(BUILD)/$*.gen.asm
 	@cat $< >> $(BUILD)/$*.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o

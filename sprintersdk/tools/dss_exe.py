@@ -324,6 +324,7 @@ def build_monoblock(
     assets: bytes,
     entry: int,
     *,
+    tables: int = EVO_TABLE_REGION,
     title: bytes = b"",
     pack: bool = False,
     mhmt: Path | None = None,
@@ -353,14 +354,16 @@ def build_monoblock(
     image = code + bytes(k * PAGE - len(code))
     code_pages = [image[i * PAGE:(i + 1) * PAGE] for i in range(k)]
 
-    # SDK code+data must stay below the loader's table region, and C must start
-    # at #2400 -- so nothing should occupy #1A00..#23FF in the image.
-    region = image[EVO_TABLE_REGION:EVO_TABLE_END]
+    # SDK code+data must stay below the loader's table region; C starts at the
+    # entry (CODE_LOC) -- so nothing should occupy [tables, entry) in the image
+    # (tables + stack, the RAM the loader fills). Both bounds auto-raise with the
+    # layout (sprinter.mk / layout.py); tables defaults to the #1A00 floor.
+    region = image[tables:entry]
     if any(region):
         raise SystemExit(
             f"dss_exe: image has data in the reserved SDK region "
-            f"0x{EVO_TABLE_REGION:04X}-0x{EVO_TABLE_END - 1:04X} (tables + stack); "
-            "SDK code+data is too large for the #0000-#19FF SRAM window"
+            f"0x{tables:04X}-0x{entry - 1:04X} (tables + stack); "
+            f"SDK code+data is too large for the #0000-0x{tables - 1:04X} SRAM window"
         )
 
     m = len(data_pages)
@@ -421,6 +424,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--load", type=lambda value: int(value, 0), required=True)
     parser.add_argument("--entry", type=lambda value: int(value, 0), required=True)
     parser.add_argument("--stack", type=lambda value: int(value, 0), required=True)
+    parser.add_argument("--tables", type=lambda value: int(value, 0),
+                        default=EVO_TABLE_REGION,
+                        help="base of the loader-filled table region (auto-raised "
+                             "EVO_TABLES; floor 0x1A00). Image must be empty in "
+                             "[tables, entry).")
     parser.add_argument("--assets", type=Path, help="append raw/packed assets after code")
     parser.add_argument("--map", type=Path, help="linker .map for runtime symbol patching")
     parser.add_argument(
@@ -478,7 +486,8 @@ def main(argv: list[str]) -> int:
             code,
             loader,
             assets,
-            MONOBLOCK_ENTRY,
+            args.entry,
+            tables=args.tables,
             title=title,
             pack=args.pack,
             mhmt=args.mhmt,

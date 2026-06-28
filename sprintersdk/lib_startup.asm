@@ -45,18 +45,13 @@
 
         .area   _SDK
 
-; ---- SDK runtime region in SRAM (#0000-#1FFF, mirror of EvoSDK #E000-#FFFF).
-;      Loader fills the tables into chunk0 before LDIR'ing it into SRAM. These
-;      EQUs MUST match loader.asm and lib_tiles.asm. ----
-EVO_PAGE_TABLE  = 0x1A00         ; asset phys page table (200 B, #1A00-#1AC7), loader-filled
-EVO_SAVED_VMODE = 0x1AC8         ; original DSS video mode (for exit), loader-filled
-EVO_SAVED_W0    = 0x1AC9         ; original DSS WIN0 phys page (for exit), loader-filled
-EVO_SAVED_W1    = 0x1ACA         ; original DSS WIN1 phys page (for exit), loader-filled
-EVO_SAVED_W3    = 0x1ACB         ; original DSS WIN3 phys page (for exit), loader-filled
-EVO_SAVED_MEM_CODE   = 0x1ACC    ; DSS code-block handle (we FreeMem it on exit), loader-filled
-EVO_SAVED_MEM_ASSETS = 0x1ACD    ; DSS asset-block handle (0 = none), loader-filled
+; ---- SDK runtime region in SRAM (mirror of EvoSDK #E000-#FFFF). The EVO_* table
+;      addresses (EVO_PAGE_TABLE, EVO_SAVED_*, EVO_META, ...) are injected by the
+;      build as a shared block derived from EVO_TABLES (evo_map.inc, prepended to
+;      every SDK .asm and the loader) so the whole map auto-raises when the SDK
+;      grows past its floor. See sprinter.mk / tools/layout.py. Loader fills the
+;      tables into chunk0 before LDIR'ing it into SRAM. ----
 DSS_FREEMEM     = 0x3E           ; DSS.FreeMem: release a GetMem block (handle in A)
-EVO_META        = 0x1B00         ; EVP1 header+metadata copy, loader-filled
 
 ; Sprinter page-register ports (WIN0..WIN3). WIN2 is the program's own window
 ; (loader/exit trampoline run there) and must NOT be restored on exit.
@@ -1253,10 +1248,7 @@ bd3_done:
 ;  Fixed: img_count @ EVO_META+16, img table @ +17. pal table base depends on
 ;  img_count -> computed once by evo_meta_init.
 ; -------------------------------------------------------------------------
-EVO_PAGE_TABLE  = 0x1A00                ; asset phys page table (loader-filled)
-EVO_META_IMGCNT = 0x1B10                ; EVO_META + 16
-EVO_IMG_TABLE   = 0x1B11                ; EVO_META + 17
-
+; EVO_PAGE_TABLE / EVO_META_IMGCNT / EVO_IMG_TABLE come from evo_map.inc (prelude).
 evo_meta_init:
         ; _pal_base = EVO_IMG_TABLE + img_count*5 + 1 (skip pal_count byte)
         ld      a, (EVO_META_IMGCNT)

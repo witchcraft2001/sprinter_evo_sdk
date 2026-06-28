@@ -89,14 +89,14 @@ TS_NAME     = 0xBD20                    ; bounced ASCIIZ filename / page-list bu
 NAME_MAX    = 48                        ; filename path <=47+NUL; page list <=48 pages
 
 ; SRAM handoff: physical page of the trampoline DRAM block, written by the loader
-; at a FIXED SRAM address (the loader is linked standalone and cannot see lib_dss
-; symbols, so the handoff goes through this absolute slot -- like the EVO_SAVED_*
-; exit slots at #1AC8..#1ACD). 0 = no page -> file I/O inert.
-_dss_tramp_page = 0x1ACE
+; at a shared SRAM slot (the loader is linked standalone and cannot see lib_dss
+; symbols, so the handoff goes through these absolute table slots, derived from
+; EVO_TABLES in evo_map.inc -- like the EVO_SAVED_* exit slots). 0 = inert.
+_dss_tramp_page = EVO_DSS_TRAMP
 ; WIN2 entry offset of the trampoline body inside that page. The body lives in the
 ; LOADER image (loader.asm dss_tramp_body), NOT in _SDK -- the loader writes its
 ; address here. dss_gate reads it and jumps in; the body returns via TS_RETURN.
-_dss_tramp_off  = 0x1ACF
+_dss_tramp_off  = EVO_DSS_TRAMP_OFF
 
 ; =========================================================================
 ;  dss_gate: drive ONE DSS/BIOS call through the trampoline. Request fields are

@@ -31,7 +31,7 @@ _entry::
         ; cannot map its own window, so it leaves WIN2 to us; it already mapped
         ; WIN1=chunk1 and WIN3=chunk3). Map WIN2, set the stack, run C.
         out     (#0xC2), a            ; WIN2 = code chunk2 page
-        ld      sp, #0x23FF
+        ld      sp, #STACK_TOP       ; floor #23FF; auto-raised by layout (sprinter.mk)
         call    gsinit
         call    _evo_runtime_init
         call    _main

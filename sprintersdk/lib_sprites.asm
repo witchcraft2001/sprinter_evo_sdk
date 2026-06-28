@@ -35,9 +35,7 @@
 
         .area   _SDK
 
-EVO_PAGE_TABLE = 0x1A00
-EVO_META       = 0x1B00
-EVP_GFX_PAGES  = EVO_META + 5
+; EVO_PAGE_TABLE / EVO_META / EVP_GFX_PAGES come from evo_map.inc (prelude).
 
 VRAM_PAGE      = 0x50                    ; write VRAM + DRAM mirror (background)
 VRAM_PAGE_SPR  = 0x5C                    ; transparent + VRAM-only (sprites)

@@ -100,19 +100,9 @@ TITLE_LEN   =       32              ; fixed title field after the mini-header
 ; ---- SDK runtime tables live in the SDK SRAM region (mirror of EvoSDK
 ;      #E000-#FFFF). The loader writes them into chunk0 (which it then LDIRs into
 ;      SRAM) through the WIN1 staging view: while chunk0 is mapped to WIN1, its
-;      offset X is reachable at #4000+X. MUST match lib_startup.asm/lib_tiles.asm.
-EVO_PAGE_TABLE   = 0x1A00           ; SRAM: asset phys page table, 200 entries (#1A00-#1AC7)
-EVO_SAVED_VMODE  = 0x1AC8           ; SRAM: original DSS video mode (for exit)
-EVO_SAVED_W0     = 0x1AC9           ; SRAM: original DSS WIN0 phys page (for exit)
-EVO_SAVED_W1     = 0x1ACA           ; SRAM: original DSS WIN1 phys page (for exit)
-EVO_SAVED_W3     = 0x1ACB           ; SRAM: original DSS WIN3 phys page (for exit)
-EVO_SAVED_MEM_CODE   = 0x1ACC       ; SRAM: DSS code-block handle (FreeMem on exit)
-EVO_SAVED_MEM_ASSETS = 0x1ACD       ; SRAM: DSS asset-block handle (0 = none)
-EVO_DSS_TRAMP    = 0x1ACE           ; SRAM: phys page for the runtime DSS trampoline
-                                    ;   (the loader's OWN page -- free after load).
-EVO_DSS_TRAMP_OFF = 0x1ACF          ; SRAM: WIN2-offset of the trampoline body in that
-                                    ;   page (u16; the body lives in this loader image).
-EVO_META         = 0x1B00           ; SRAM: EVP1 header+metadata copy
+;      offset X is reachable at #4000+X. The EVO_* addresses come from evo_map.inc
+;      (prelude, derived from EVO_TABLES) -- shared with the SDK libs, and they
+;      auto-raise together when the SDK grows. See sprinter.mk / tools/layout.py.
 STAGE            = 0x4000           ; WIN1 view base of a page during staging
 STAGE_PAGE_TABLE = STAGE + EVO_PAGE_TABLE
 STAGE_SAVED_VMODE = STAGE + EVO_SAVED_VMODE
