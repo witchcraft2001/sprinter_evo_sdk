@@ -23,6 +23,9 @@
         .globl  _sample_play
         .globl  _sound_tick
         .globl  _evo_cbl_irq            ; IM2 #FF vector hook (CBL refill / video IRQ)
+        .if VSYNC_IRQ
+        .globl  _vsync_flag             ; latched here on the #FF vblank branch (lib_startup)
+        .endif
 
         .area   _SDK
 
@@ -284,10 +287,18 @@ _evo_cbl_irq::
         push    af
         ld      a, (_cbl_active)
         or      a
+        .if VSYNC_IRQ
+        jr      z, cbl_irq_vblank       ; no active sample -> plain video IRQ (= vblank)
+        .else
         jr      z, cbl_irq_ret          ; no active sample -> plain video IRQ
+        .endif
         in      a, (#0xFE)
         and     #0x80
+        .if VSYNC_IRQ
+        jr      z, cbl_irq_vblank       ; bit7=0 -> not a CBL refill -> treat as vblank
+        .else
         jr      z, cbl_irq_ret          ; bit7=0 -> not a CBL half-empty event
+        .endif
         push    bc
         push    de
         push    hl
@@ -332,6 +343,12 @@ cbl_irq_busy:
         pop     hl
         pop     de
         pop     bc
+        .if VSYNC_IRQ
+        jr      cbl_irq_ret             ; refill path: return WITHOUT latching the frame
+cbl_irq_vblank:                         ; plain video IRQ (vblank) -> latch frame for _vsync
+        ld      a, #0xFF
+        ld      (_vsync_flag), a
+        .endif
 cbl_irq_ret:
         pop     af
         ei

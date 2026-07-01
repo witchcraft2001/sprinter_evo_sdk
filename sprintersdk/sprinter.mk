@@ -75,6 +75,16 @@ SAMPLE_ASYNC_STAMP ?= $(BUILD)/sample_async.stamp
 # the loader to hand off a trampoline page. Default 0 -> not assembled, byte-identical.
 FILEIO ?= 0
 FILEIO_STAMP ?= $(BUILD)/fileio.stamp
+# VSYNC_IRQ=1 (DEFAULT): vsync() waits the frame via the latched video IRQ (#FF) +
+# ei/halt instead of polling #FE.5. Robust against an IM2 handler (CBL refill / CTC
+# music) landing in the ~1ms blank window and skipping a frame (fixed the Avalanche
+# explode stutter; verified on hardware across game_xnx/innsmouth/robo/Avalanche).
+# It is a strict win (more correct, slightly smaller code), so it is the default.
+# VSYNC_IRQ=0 falls back to the proven #FE.5 poll (escape hatch, e.g. if an emulator
+# mis-times #FF). Prepended as `VSYNC_IRQ = N` to each SDK .asm (`.if VSYNC_IRQ`).
+# HW_NOTES §6.4.1. No evo.h/API change.
+VSYNC_IRQ ?= 1
+VSYNC_IRQ_STAMP ?= $(BUILD)/vsync_irq.stamp
 SEGA_EX ?= 0
 SEGA_EX_STAMP ?= $(BUILD)/sega_ex.stamp
 RESOURCES_H ?= $(PROJECT)/resources.h
@@ -201,6 +211,11 @@ $(FILEIO_STAMP): FORCE | $(BUILD)
 	printf '%s\n' 'FILEIO=$(FILEIO)' > "$$tmp"; \
 	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
 
+$(VSYNC_IRQ_STAMP): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' 'VSYNC_IRQ=$(VSYNC_IRQ)' > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 $(SEGA_EX_STAMP): FORCE | $(BUILD)
 	@tmp="$@.tmp"; \
 	printf '%s\n' 'SEGA_EX=$(SEGA_EX)' > "$$tmp"; \
@@ -307,9 +322,9 @@ $(BUILD)/%.rel: $(SDK_DIR)%.s | $(BUILD)
 # --- asm (.asm) -> .rel : SDK libs lib_startup/tiles/sprites/input/sound ---
 # Prepend `UNROLL = N` and `NATIVE = N` so the libs can select compile-time variants
 # via `.if UNROLL` / `.if NATIVE` (as-z80 has no -D). Changing either re-touches its stamp.
-$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) $(FILEIO_STAMP) $(EVO_MAP_INC) | $(BUILD)
+$(BUILD)/%.rel: $(SDK_DIR)%.asm $(UNROLL_STAMP) $(NATIVE_STAMP) $(SEGA_EX_STAMP) $(SPRITE16_STAMP) $(SAMPLE_ASYNC_STAMP) $(FILEIO_STAMP) $(VSYNC_IRQ_STAMP) $(EVO_MAP_INC) | $(BUILD)
 	@cat $(EVO_MAP_INC) > $(BUILD)/$*.gen.asm
-	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\nFILEIO = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' '$(FILEIO)' >> $(BUILD)/$*.gen.asm
+	@printf 'UNROLL = %s\nNATIVE = %s\nSEGA_EX = %s\nSPRITE16 = %s\nSAMPLE_ASYNC = %s\nFILEIO = %s\nVSYNC_IRQ = %s\n' '$(UNROLL)' '$(NATIVE)' '$(SEGA_EX)' '$(SPRITE16)' '$(SAMPLE_ASYNC)' '$(FILEIO)' '$(VSYNC_IRQ)' >> $(BUILD)/$*.gen.asm
 	@cat $< >> $(BUILD)/$*.gen.asm
 	$(SDASZ80) $(SDASZ_FLAGS) $@ $(BUILD)/$*.gen.asm
 	cp $@ $(basename $@).o

@@ -19,6 +19,9 @@
         .globl  _rand16
         .globl  _border
         .globl  _vsync
+        .if VSYNC_IRQ
+        .globl  _vsync_flag             ; set by _evo_cbl_irq (#FF vblank), read by _vsync
+        .endif
         .globl  _swap_screen
         .globl  _time
         .globl  _delay
@@ -453,6 +456,34 @@ _border::
         out     (#0xFE), a              ; EvoSDK-compatible border port
         ret
 
+        .if VSYNC_IRQ
+; VSYNC_IRQ build: wait one frame via the hardware video IRQ. _evo_cbl_irq (#FF, the
+; ~50Hz Sprinter video IRQ) latches _vsync_flag in its non-refill (vblank) branch; we
+; clear the flag and ei/halt until it reappears. The frame IRQ is latched in hardware,
+; so -- unlike the #FE.5 poll -- an IM2 handler (CBL refill / CTC music) overlapping the
+; blank can't make us skip a frame. halt keeps interrupts live, so CBL + music are
+; serviced while we wait. Safe: _vsync is only reached after IM2 is up (swap_screen/
+; delay), never from init. VSYNC_TIMEOUT bounds halt wakeups so a stalled #FF can't
+; deadlock (it would otherwise spin forever on the CTC wakeup with the flag never set);
+; it is far above the worst-case wakeups-per-frame, so it never trips in normal use.
+; HW_NOTES §6.4. _time is advanced by the CTC IM2 handler, not here.
+VSYNC_TIMEOUT = 0x0100
+_vsync::
+        xor     a
+        ld      (_vsync_flag), a
+        ld      bc, #VSYNC_TIMEOUT
+1$:
+        ld      a, (_vsync_flag)
+        or      a
+        ret     nz                      ; frame latched -> return (caller flips in blank)
+        dec     bc
+        ld      a, b
+        or      c
+        ret     z                       ; timeout: #FF stalled -> do not deadlock
+        ei
+        halt                            ; sleep until ANY IRQ (CBL/CTC/video), then re-check
+        jr      1$
+        .else
 _vsync::
         ; Tear-free frame sync by polling #FFFE bit5 (1 = bottom blank Y>256,
         ; 0 = active). Wait until ACTIVE (bit5=0), then until the blank STARTS
@@ -483,6 +514,7 @@ _vsync::
         or      e
         jr      nz, 3$
         ret
+        .endif
 
 _swap_screen::
         call    _sprites_render_before_swap
@@ -1316,6 +1348,10 @@ pal_bright_table:
         ; shutdown launcher before CACHE off.
 _screen_active:
         .db     0
+        .if VSYNC_IRQ
+_vsync_flag:                            ; 0 = waiting; #FF = a frame (#FF vblank IRQ) passed
+        .db     0
+        .endif
         .if SAMPLE_ASYNC
 _snd_irq_ready:                         ; 0 until im2_sound_setup installs IM2 vectors;
         .db     0                       ; gates the narrowed-DI EI in the fill loop
